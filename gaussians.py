@@ -1,3 +1,4 @@
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as st
@@ -12,8 +13,13 @@ from matplotlib.patches import Ellipse
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
 def plot_gaussians(means, covariances, values, opacities, d):
-    covariances = covariances.reshape(-1,d,d)
-    covariance = np.zeros((covariances.shape[0], d, d))
+    nx, ny = covariances.shape[:2]
+
+    means = means.cpu().numpy()
+    values = values.cpu().numpy()
+    opacities = opacities.cpu().numpy()
+    covariances = covariances.cpu().numpy().reshape(-1,d,d)
+    covariance = np.zeros((covariances.shape[0], 3, 3))
     covariance[:,:d,:d] = covariances
     covariance[:,2,2] = 1.0
 
@@ -22,14 +28,14 @@ def plot_gaussians(means, covariances, values, opacities, d):
 
     for i in range(ny):
         for j in range(nx):
-            ellipse = Ellipse(xy=(0.0, 0.0), width=1.0, height=1.0, fc=values[i,j].numpy(), alpha=opacities[i,j].item())
+            color = matplotlib.cm.get_cmap('viridis')
+            ellipse = Ellipse(xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(values[i,j]), alpha=opacities[i,j].item())
             affine = Affine2D(covariance[i*nx+j,:,:]).translate(*means[i,j,:2])
             ellipse.set_transform(affine + ax.transData)
 
             ax.add_patch(ellipse)
 
     plt.axis("scaled")
-    plt.show()
 
 
 # def compute_gaussian(all_densities, opacities, values, nx, ny, k, l, d):
@@ -74,6 +80,21 @@ def sample_gaussians(means, covariances, opacities, values, samples, d):
     res = res / densities.sum(dim=(1,2)).reshape(-1, 1, 1, 1)
 
     return res
+
+def _sample_gaussians_region(d, center, size, dx):
+    t = []
+    for i in range(d):
+        half_size = (size[i] - 1) / 2
+        t.append(center[i] + torch.linspace(-half_size * dx[i], half_size * dx[i], size[i]))
+
+    grid = torch.meshgrid(t, indexing="xy")
+    samples = torch.stack(grid, dim=-1).reshape(-1, d)
+
+    return samples
+
+def sample_gaussians_region(means, covariances, opacities, values, d, center, size, dx):
+    samples = _sample_gaussians_region(d, center, size, dx)
+    return sample_gaussians(means, covariances, opacities, values, samples, d)
 
 def sample_gaussians_img(means, covariances, opacities, values, w, h, d):
     tx = torch.linspace(-1, 1, w).cuda()
@@ -174,9 +195,65 @@ def build_covariances(s, t):
     S = torch.diag_embed(s)
     T = torch.diag_embed(torch.zeros(s.shape, device="cuda"))
     indices = torch.tril_indices(s.shape[-1], s.shape[-1], -1)
+
     T[..., indices[0], indices[1]] = t
-    T = T + torch.transpose(T, -1, -2)
     T = T + torch.diag_embed(torch.ones(s.shape, device="cuda"))
 
-    return S @ T
+    return T @ S @ torch.transpose(T, -1, -2)
 
+
+import unittest
+
+class UnitTests(unittest.TestCase):
+    def contains(self, expected, samples):
+        for element in expected:
+            anyTrue = False
+            for sample in samples:
+                anyTrue |= torch.all(torch.isclose(sample, element))
+
+            self.assertTrue(anyTrue)
+
+    def test_sample_region_2d_2(self):
+        samples = _sample_gaussians_region(2, torch.zeros(2), (2, 2), torch.ones(2))
+        self.assertEqual(samples.shape, (4, 2))
+        expected = [
+            torch.tensor([-0.5, -0.5]),
+            torch.tensor([0.5, -0.5]),
+            torch.tensor([-0.5, 0.5]),
+            torch.tensor([0.5, 0.5]),
+        ]
+        self.contains(expected, samples)
+
+    def test_sample_region_2d_3(self):
+        samples = _sample_gaussians_region(2, torch.tensor([0.0, 0.5]), (3, 3), torch.ones(2) * 0.5)
+        self.assertEqual(samples.shape, (9, 2))
+        expected = [
+            torch.tensor([-0.5, 0.0]),
+            torch.tensor([0.0, 0.0]),
+            torch.tensor([0.5, 0.0]),
+            torch.tensor([-0.5, 0.5]),
+            torch.tensor([0.0, 0.5]),
+            torch.tensor([0.5, 0.5]),
+            torch.tensor([-0.5, 1.0]),
+            torch.tensor([0.0, 1.0]),
+            torch.tensor([0.5, 1.0]),
+        ]
+        self.contains(expected, samples)
+
+    def test_sample_region_3d_2(self):
+        samples = _sample_gaussians_region(3, torch.tensor([2.0, -1.0, 0.0]), (2, 2, 2), torch.ones(3) * 2.0)
+        self.assertEqual(samples.shape, (8, 3))
+        expected = [
+            torch.tensor([1.0, -2.0, -1.0]),
+            torch.tensor([3.0, -2.0, -1.0]),
+            torch.tensor([1.0, 0.0, -1.0]),
+            torch.tensor([3.0, 0.0, -1.0]),
+            torch.tensor([1.0, -2.0, 1.0]),
+            torch.tensor([3.0, -2.0, 1.0]),
+            torch.tensor([1.0, 0.0, 1.0]),
+            torch.tensor([3.0, 0.0, 1.0]),
+        ]
+        self.contains(expected, samples)
+
+if __name__ == '__main__':
+    unittest.main()
