@@ -31,13 +31,14 @@ transform = f.tanh(transform)
 
 covariances = gaussians.build_covariances(scaling, transform)
 
-tx = torch.linspace(-1, 1, 32).cuda()
-ty = torch.linspace(-1, 1, 32).cuda()
+res = 64
+tx = torch.linspace(-1, 1, res).cuda()
+ty = torch.linspace(-1, 1, res).cuda()
 gx, gy = torch.meshgrid((tx, ty), indexing="xy")
-samples = torch.stack((gx, gy), dim=-1).reshape(32 * 32, d)
+samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
 
 img = gaussians.gaussian_derivative(means, covariances, opacities, values, samples, d)
-img = img.sum(dim=(1,2)).reshape(32, 32, -1).detach().cpu().numpy()
+img = img.sum(dim=(1,2)).reshape(res, res, -1).detach().cpu().numpy()
 
 fig = plt.figure()
 ax = fig.subplots(1, 2)
@@ -50,7 +51,7 @@ plt.colorbar(im)
 plt.savefig("derivatives.png")
 
 img = gaussians.gaussian_derivative2(means, covariances, opacities, values, samples, d)
-img = img.sum(dim=(1,2)).reshape(32, 32, -1).detach().cpu().numpy()
+img = img.sum(dim=(1,2)).reshape(res, res, -1).detach().cpu().numpy()
 
 fig = plt.figure()
 ax = fig.subplots(1, 2)
