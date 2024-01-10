@@ -34,6 +34,7 @@ transform = f.tanh(transform)
 
 covariances = gaussians.build_covariances(scaling, transform)
 conics = torch.inverse(covariances)
+inv_sqrt_det = torch.sqrt(torch.det(conics))
 
 res = 64
 tx = torch.linspace(-1, 1, res).cuda()
@@ -42,10 +43,10 @@ gx, gy = torch.meshgrid((tx, ty), indexing="xy")
 samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
 samples.requires_grad = True
 
-result = gaussians.sample_gaussians(means, conics, opacities, values, samples)
+result = gaussians.sample_gaussians(means, inv_sqrt_det, conics, opacities, values, samples)
 grad1 = torch.autograd.grad(result.sum(), samples, retain_graph=True, create_graph=True)[0]
 
-img = gaussians.gaussian_derivative(means, conics, opacities, values, samples)
+img = gaussians.gaussian_derivative(means, inv_sqrt_det, conics, opacities, values, samples)
 img1 = img.sum(dim=(1,2)).reshape(res, res, -1).detach().cpu().numpy()
 img2 = grad1.reshape(res, res, -1).detach().cpu().numpy()
 img3 = img1-img2
@@ -92,7 +93,7 @@ grad2_1 = torch.autograd.grad(grad1[:,0].sum(), samples, retain_graph=True)[0]
 grad2_2 = torch.autograd.grad(grad1[:,1].sum(), samples)[0]
 grad2 = torch.cat((grad2_1, grad2_2), dim=-1)
 
-img = gaussians.gaussian_derivative2(means, conics, opacities, values, samples)
+img = gaussians.gaussian_derivative2(means, inv_sqrt_det, conics, opacities, values, samples)
 img1 = img.sum(dim=(1,2)).reshape(res, res, -1).detach().cpu().numpy()
 img2 = grad2.reshape(res, res, -1).detach().cpu().numpy()
 img3 = img1-img2
