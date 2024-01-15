@@ -136,15 +136,15 @@ def gaussian_derivative2(means, inv_sqrt_det, conics, opacities, values, samples
     x = samples.reshape(-1, 1, 1, d, 1) - means.reshape(1, nx, ny, d, 1)
     inv_prod = conics @ x
     powers = -0.5 * (x.transpose(-1, -2) @ inv_prod)
-    densities = inv_sqrt_det.reshape(1, nx, ny, 1, 1) * torch.exp(powers).reshape(-1, nx, ny, 1, 1)
+    densities = inv_sqrt_det.reshape(1, nx, ny, 1, 1, 1) * torch.exp(powers).reshape(-1, nx, ny, 1, 1, 1)
     ones = torch.ones(x.shape, device="cuda")
-    derivatives = (inv_prod @ inv_prod.transpose(-1, -2) - conics).reshape(-1, nx, ny, d, d) * densities
+    derivatives = (inv_prod @ inv_prod.transpose(-1, -2) - conics).reshape(-1, nx, ny, d, d, 1) * densities
 
-    opacities = opacities.reshape(1, nx, ny, 1, 1)
-    values = values.reshape(1, nx, ny, 1, -1)
+    opacities = opacities.reshape(1, nx, ny, 1, 1, 1)
+    values = values.reshape(1, nx, ny, 1, 1, -1)
 
     res = derivatives * opacities * values
-    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1)
+    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1, 1)
 
     return res
 

@@ -34,7 +34,8 @@ transform = f.tanh(transform)
 
 covariances = gaussians.build_covariances(scaling, transform)
 conics = torch.inverse(covariances)
-inv_sqrt_det = torch.sqrt(torch.det(conics))
+inv_sqrt_pi = np.power(1.0 / np.sqrt(2.0 * np.pi), d)
+inv_sqrt_det = inv_sqrt_pi * torch.sqrt(torch.det(conics))
 
 res = 64
 tx = torch.linspace(-1, 1, res).cuda()
