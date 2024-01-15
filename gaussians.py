@@ -23,8 +23,8 @@ def plot_gaussians(means, covariances, opacities, values):
     covariance[:,:d,:d] = covariances
     covariance[:,2,2] = 1.0
 
-    plt.figure()
-    ax = plt.gca()
+    fig = plt.figure()
+    ax = fig.gca()
 
     for i in range(ny):
         for j in range(nx):
@@ -36,7 +36,7 @@ def plot_gaussians(means, covariances, opacities, values):
             ax.add_patch(ellipse)
 
     plt.axis("scaled")
-
+    return fig
 
 # def compute_gaussian(all_densities, opacities, values, nx, ny, k, l, d):
 #     value = 0
@@ -76,7 +76,7 @@ def sample_gaussians(means, inv_sqrt_det, conics, opacities, values, samples):
     values = values.reshape(1, nx, ny, -1)
 
     res = densities * opacities * values
-    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1)
+    res = res / (densities * opacities).sum(dim=(1,2)).reshape(-1, 1, 1, 1)
 
     return res
 
@@ -126,7 +126,7 @@ def gaussian_derivative(means, inv_sqrt_det, conics, opacities, values, samples)
     values = values.reshape(1, nx, ny, 1, -1)
 
     res = derivatives * opacities * values
-    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1)
+    res = res / (densities * opacities).sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1)
 
     return res
 
@@ -144,7 +144,7 @@ def gaussian_derivative2(means, inv_sqrt_det, conics, opacities, values, samples
     values = values.reshape(1, nx, ny, 1, 1, -1)
 
     res = derivatives * opacities * values
-    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1, 1)
+    res = res / (densities * opacities).sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1, 1)
 
     return res
 
