@@ -27,15 +27,14 @@ sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, 1, d, 1)
 samples = means.unsqueeze(-1) - sample_mean
 powers = -0.5 * (samples.transpose(-1, -2) @ (conic @ samples))
 values = torch.exp(powers).squeeze(-1)
-values = values / torch.max(values)
+values = values
 
 scaling = torch.exp(scaling)
 transform = f.tanh(transform)
 
 covariances = gaussians.build_covariances(scaling, transform)
 conics = torch.inverse(covariances)
-inv_sqrt_pi = np.power(1.0 / np.sqrt(2.0 * np.pi), d)
-inv_sqrt_det = inv_sqrt_pi * torch.sqrt(torch.det(conics))
+inv_sqrt_det = torch.sqrt(torch.det(conics))
 
 res = 64
 tx = torch.linspace(-1, 1, res).cuda()

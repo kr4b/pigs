@@ -29,8 +29,8 @@ def plot_gaussians(means, covariances, opacities, values):
     for i in range(ny):
         for j in range(nx):
             color = matplotlib.cm.get_cmap('viridis')
-            ellipse = Ellipse(xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(values[j,i,0]), alpha=opacities[i,j].item())
-            affine = Affine2D(covariance[j*ny+i,:,:]).translate(*means[j,i,:2])
+            ellipse = Ellipse(xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(values[i,j,0]), alpha=opacities[i,j].item())
+            affine = Affine2D(covariance[i*nx+j,:,:]).translate(*means[i,j,:2])
             ellipse.set_transform(affine + ax.transData)
 
             ax.add_patch(ellipse)
@@ -76,7 +76,7 @@ def sample_gaussians(means, inv_sqrt_det, conics, opacities, values, samples):
     values = values.reshape(1, nx, ny, -1)
 
     res = densities * opacities * values
-    res = res / (densities * opacities).sum(dim=(1,2)).reshape(-1, 1, 1, 1)
+    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1)
 
     return res
 
@@ -126,7 +126,7 @@ def gaussian_derivative(means, inv_sqrt_det, conics, opacities, values, samples)
     values = values.reshape(1, nx, ny, 1, -1)
 
     res = derivatives * opacities * values
-    res = res / (densities * opacities).sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1)
+    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1)
 
     return res
 
@@ -144,7 +144,7 @@ def gaussian_derivative2(means, inv_sqrt_det, conics, opacities, values, samples
     values = values.reshape(1, nx, ny, 1, 1, -1)
 
     res = derivatives * opacities * values
-    res = res / (densities * opacities).sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1, 1)
+    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1, 1)
 
     return res
 
@@ -194,6 +194,7 @@ def rasterize_gaussians(means, covariances, opacities, values, w, h):
     return rendered_image.transpose(0, -1)
 
 def build_covariances(s, t):
+    t = torch.tanh(t)
     S = torch.diag_embed(s)
     T = torch.diag_embed(torch.zeros(s.shape, device="cuda"))
     indices = torch.tril_indices(s.shape[-1], s.shape[-1], -1)
