@@ -13,6 +13,7 @@ class Problem(enum.Enum):
     POISSON = enum.auto()
     BURGERS = enum.auto()
     WAVE = enum.auto()
+    NAVIER_STOKES = enum.auto()
 
 class IntegrationRule(enum.Enum):
     TRAPEZOID = enum.auto()
@@ -103,6 +104,9 @@ class Model(nn.Module):
             self.initial_u[nx//2-1,ny//2,0] = 1.0
             self.initial_u[nx//2,ny//2-1,0] = 1.0
             self.initial_u[nx//2,ny//2,0] = 1.0
+        elif problem == Problem.NAVIER_STOKES:
+            self.channels = 3
+            self.initial_u = torch.zeros((nx, ny, self.channels), device="cuda")
         else:
             sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, 1, d, 1)
             samples = self.initial_means.unsqueeze(-1) - sample_mean
@@ -121,8 +125,14 @@ class Model(nn.Module):
         self.gaussian_model = Network(
             self.channels, out_channels, self.kernel_size, nn.SiLU()).cuda()
 
-        self.solution_model = Network(
-            self.channels, self.channels, self.kernel_size, nn.Tanh()).cuda()
+        if self.problem == Problem.NAVIER_STOKES:
+            self.solution_model_v = Network(
+                self.channels, 2, self.kernel_size, nn.Tanh()).cuda()
+            self.solution_model_p = Network(
+                self.channels, 1, self.kernel_size, nn.Tanh()).cuda()
+        else:
+            self.solution_model = Network(
+                self.channels, self.channels, self.kernel_size, nn.Tanh()).cuda()
 
         self.reset()
 
@@ -166,9 +176,19 @@ class Model(nn.Module):
             self.nx * self.ny, self.channels, self.kernel_size, self.kernel_size
         ) # nx*ny, c, k, k
 
-        deltas = self.solution_model(
-            in_samples, self.means.reshape(self.nx * self.ny, self.d)
-        ).reshape(self.nx, self.ny, self.channels)
+        if self.problem == Problem.NAVIER_STOKES:
+            delta_v = self.solution_model_v(
+                in_samples, self.means.reshape(self.nx * self.ny, self.d)
+            ).reshape(self.nx, self.ny, 2)
+            delta_p = self.solution_model_p(
+                in_samples, self.means.reshape(self.nx * self.ny, self.d)
+            ).reshape(self.nx, self.ny, 1)
+
+            deltas = torch.cat((delta_v, delta_p), dim=-1)
+        else:
+            deltas = self.solution_model(
+                in_samples, self.means.reshape(self.nx * self.ny, self.d)
+            ).reshape(self.nx, self.ny, self.channels)
 
         self.u = self.u + deltas
 
@@ -261,6 +281,14 @@ class Model(nn.Module):
             pde_loss += torch.mean((ut[...,0] - u_sample[...,1]) ** 2)
             pde_loss += 0.01 * torch.mean(
                 (ut[...,1] - 10 * (uxx[...,0,0,0] + uxx[...,1,1,0]) + 0.1 * u_sample[...,1]) ** 2)
+
+        elif self.problem == Problem.NAVIER_STOKES:
+            pde_loss += torch.mean((ux[...,:2].sum(-1)) ** 2)
+            pde_loss += torch.mean((
+                ut[...,:2] + (u_sample[...,:2] * ux).sum(-1) \
+                + self.inv_rho * self.ux[...,-1] \
+                - self.nu * (uxx[:,0,0] + uxx[:,1,1])
+            ) ** 2)
 
         else:
             raise ValueError("Unexpected PDE problem:", self.problem)
