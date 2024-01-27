@@ -26,11 +26,11 @@ def plot_gaussians(means, covariances, opacities, values):
     fig = plt.figure()
     ax = fig.gca()
 
-    for i in range(ny):
-        for j in range(nx):
+    for i in range(nx):
+        for j in range(ny):
             color = matplotlib.cm.get_cmap('viridis')
             ellipse = Ellipse(xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(values[i,j,0]), alpha=opacities[i,j].item())
-            affine = Affine2D(covariance[i*nx+j,:,:]).translate(*means[i,j,:2])
+            affine = Affine2D(covariance[i*ny+j,:,:]).translate(*means[i,j,:2])
             ellipse.set_transform(affine + ax.transData)
 
             ax.add_patch(ellipse)
@@ -65,20 +65,19 @@ def plot_gaussians(means, covariances, opacities, values):
 #        for l in range(h):
 #            img[l,k] = compute_gaussian(densities, opacities, values, nx, ny, k, l)[0]
 
-def sample_gaussians(means, inv_sqrt_det, conics, opacities, values, samples):
+def sample_gaussians(means, conics, opacities, values, samples):
     nx, ny, d = means.shape
 
     x = samples.reshape(-1, 1, 1, d, 1) - means.reshape(1, nx, ny, d, 1)
     powers = -0.5 * (x.transpose(-1, -2) @ (conics @ x))
-    densities = inv_sqrt_det.reshape(1, nx, ny, 1) * torch.exp(powers).reshape(-1, nx, ny, 1)
+    densities = torch.exp(powers).reshape(-1, nx, ny, 1)
 
     opacities = opacities.reshape(1, nx, ny, 1)
     values = values.reshape(1, nx, ny, -1)
 
     res = densities * opacities * values
-    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1)
 
-    return res
+    return res.sum((1,2))
 
 def _sample_gaussians_region(d, centers, size, dx):
     t = []
@@ -87,20 +86,20 @@ def _sample_gaussians_region(d, centers, size, dx):
         t.append(torch.linspace(-half_size, half_size, size[i]).cuda() * dx[i])
 
     grid = torch.meshgrid(t, indexing="xy")
-    samples = centers.reshape(-1, 1, d) + torch.stack(grid, dim=-1).reshape(1, -1, d)
+    samples = (centers.reshape(-1, 1, d) + torch.stack(grid, dim=-1).reshape(1, -1, d)).reshape(-1,d)
 
     return samples
 
-def sample_gaussians_region(means, inv_sqrt_det, conics, opacities, values, center, size, dx):
+def sample_gaussians_region(means, conics, opacities, values, center, size, dx):
     nx, ny, d = means.shape
     samples = _sample_gaussians_region(d, center, size, dx)
-    return sample_gaussians(means, inv_sqrt_det, conics, opacities, values, samples)
+    return sample_gaussians(means, conics, opacities, values, samples)
 
-def sample_gaussians_img(means, inv_sqrt_det, conics, opacities, values, w, h):
+def sample_gaussians_img(means, conics, opacities, values, w, h):
     nx, ny, d = means.shape
 
     tx = torch.linspace(-1, 1, w).cuda()
-    ty = torch.linspace(-1, 1, h).cuda()
+    ty = torch.flip(torch.linspace(-1, 1, h).cuda().unsqueeze(-1), (0,1)).squeeze()
     gx, gy = torch.meshgrid((tx, ty), indexing="xy")
     if d == 3:
         gz = torch.ones((w,h), device="cuda")
@@ -108,35 +107,33 @@ def sample_gaussians_img(means, inv_sqrt_det, conics, opacities, values, w, h):
     if d == 2:
         samples = torch.stack((gx, gy), dim=-1).reshape(w * h, d)
 
-    img = sample_gaussians(means, inv_sqrt_det, conics, opacities, values, samples)
-    img = img.sum(dim=(1,2))
+    img = sample_gaussians(means, conics, opacities, values, samples)
 
     return img.reshape(w, h, -1)
 
-def gaussian_derivative(means, inv_sqrt_det, conics, opacities, values, samples):
+def gaussian_derivative(means, conics, opacities, values, samples):
     nx, ny, d = means.shape
 
     x = samples.reshape(-1, 1, 1, d, 1) - means.reshape(1, nx, ny, d, 1)
     inv_prod = conics @ x
     powers = -0.5 * (x.transpose(-1, -2) @ inv_prod)
-    densities = inv_sqrt_det.reshape(1, nx, ny, 1, 1) * torch.exp(powers).reshape(-1, nx, ny, 1, 1)
+    densities = torch.exp(powers).reshape(-1, nx, ny, 1, 1)
     derivatives = -inv_prod.reshape(-1, nx, ny, d, 1) * densities
 
     opacities = opacities.reshape(1, nx, ny, 1, 1)
     values = values.reshape(1, nx, ny, 1, -1)
 
     res = derivatives * opacities * values
-    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1)
 
-    return res
+    return res.sum((1,2))
 
-def gaussian_derivative2(means, inv_sqrt_det, conics, opacities, values, samples):
+def gaussian_derivative2(means, conics, opacities, values, samples):
     nx, ny, d = means.shape
 
     x = samples.reshape(-1, 1, 1, d, 1) - means.reshape(1, nx, ny, d, 1)
     inv_prod = conics @ x
     powers = -0.5 * (x.transpose(-1, -2) @ inv_prod)
-    densities = inv_sqrt_det.reshape(1, nx, ny, 1, 1, 1) * torch.exp(powers).reshape(-1, nx, ny, 1, 1, 1)
+    densities = torch.exp(powers).reshape(-1, nx, ny, 1, 1, 1)
     ones = torch.ones(x.shape, device="cuda")
     derivatives = (inv_prod @ inv_prod.transpose(-1, -2) - conics).reshape(-1, nx, ny, d, d, 1) * densities
 
@@ -144,9 +141,8 @@ def gaussian_derivative2(means, inv_sqrt_det, conics, opacities, values, samples
     values = values.reshape(1, nx, ny, 1, 1, -1)
 
     res = derivatives * opacities * values
-    res = res / opacities.sum(dim=(1,2)).reshape(-1, 1, 1, 1, 1, 1)
 
-    return res
+    return res.sum((1,2))
 
 def rasterize_gaussians(means, covariances, opacities, values, w, h):
     projection = torch.tensor([

@@ -12,7 +12,7 @@ cov = torch.tensor([[0.1, 0.0, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, 1.0]])
 
 tx = torch.linspace(-1, 1, nx)
 ty = torch.linspace(-1, 1, ny)
-gx, gy = torch.meshgrid((tx,ty), indexing="xy")
+gx, gy = torch.meshgrid((tx,ty), indexing="ij")
 gz = torch.ones((nx,ny))
 means = torch.stack((gx,gy,gz), dim=-1)
 values = torch.tensor(st.multivariate_normal.pdf(means, mean=[0,0,0], cov=cov), dtype=torch.float32)

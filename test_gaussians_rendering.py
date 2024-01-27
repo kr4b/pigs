@@ -13,7 +13,7 @@ d = 3
 
 tx = torch.linspace(-1, 1, nx).cuda()
 ty = torch.linspace(-1, 1, ny).cuda()
-gx, gy = torch.meshgrid((tx,ty), indexing="xy")
+gx, gy = torch.meshgrid((tx,ty), indexing="ij")
 gz = torch.ones((nx,ny), device="cuda")
 means = torch.stack((gx,gy,gz), dim=-1)
 scaling = torch.ones((nx,ny,d), device="cuda") * -2.0
@@ -34,7 +34,7 @@ covariances = gaussians.build_covariances(scaling, transform)
 
 #gaussians.plot_gaussians(means, covariances, values, opacities,d)
 
-res = 32
+res = 64
 img1 = gaussians.sample_gaussians_img(
     means, covariances, opacities, values, res, res, d
 ).detach().cpu().numpy()[:,:,0]

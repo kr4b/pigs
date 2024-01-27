@@ -13,7 +13,7 @@ import model
 
 from model import *
 
-dt = 0.1
+dt = 1
 dx = 0.05
 
 train_timesteps = 10
@@ -144,20 +144,20 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
             plt.yscale("log")
             plt.savefig("training_error.png")
 
-        torch.save({
-            "epoch": epoch + 1,
-            "model": model.state_dict(),
-            "optimizer": optim.state_dict(),
-        }, "{}_model.pt".format(model.problem.name.lower()))
+    torch.save({
+        "epoch": epoch + 1,
+        "model": model.state_dict(),
+        "optimizer": optim.state_dict(),
+    }, "{}_model.pt".format(model.problem.name.lower()))
 
-res = 128
+res = 64
 os.makedirs("results", exist_ok=True)
 
 model.reset()
 model.eval()
 
-if True:
-# with torch.no_grad():
+# if True:
+with torch.no_grad():
     imgs1 = []
     imgs2 = []
     imgs3 = []
@@ -178,13 +178,13 @@ if True:
         # img_samples.requires_grad = True
 
         # u = gaussians.sample_gaussians(
-        #     model.means, model.inv_sqrt_det, model.conics, model.opacities, model.u, img_samples
+        #     model.means, model.conics, model.opacities, model.u, img_samples
         # )#.sum(dim=(1,2)).reshape(res, res, 2).detach().cpu().numpy()
 
         # us.append(u)
 
         # uxx = gaussians.gaussian_derivative2(
-        #     model.means, model.inv_sqrt_det, model.conics, model.opacities, model.u, img_samples
+        #     model.means, model.conics, model.opacities, model.u, img_samples
         # ).sum(dim=(1,2)).reshape(res, res, 2, 2, 2).detach().cpu().numpy()
 
         # grad1 = torch.autograd.grad(u[...,0].sum(), img_samples, retain_graph=True, create_graph=True)[0]
@@ -200,9 +200,9 @@ if True:
 
         # uxxs.append(uxx)
 
-        # fig = model.plot_gaussians()
-        # plt.savefig("results/gaussians_plot{}.png".format(i))
-        # plt.close(fig)
+        fig = model.plot_gaussians()
+        plt.savefig("results/gaussians_plot{}.png".format(i))
+        plt.close(fig)
 
         with torch.no_grad():
             img1, img2, img3, img4 = model.generate_images(res)

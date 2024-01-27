@@ -79,11 +79,11 @@ class Model(nn.Module):
         self.bc_weight = 1
         self.conservation_weight = 1
 
-        self.channels = 2 if problem == Problem.WAVE else 1
+        self.channels = 1
 
         tx = torch.linspace(-1, 1, nx).cuda()
         ty = torch.linspace(-1, 1, ny).cuda()
-        gx, gy = torch.meshgrid((tx,ty), indexing="xy")
+        gx, gy = torch.meshgrid((tx,ty), indexing="ij")
         self.initial_means = torch.stack((gx,gy), dim=-1)
         scaling = torch.ones((nx,ny,d), device="cuda") * -5.0
         self.initial_scaling = torch.exp(scaling)
@@ -91,18 +91,14 @@ class Model(nn.Module):
         self.initial_transform = torch.zeros((nx,ny,self.transform_size), device="cuda")
         self.initial_opacities = torch.sigmoid(torch.zeros((nx,ny), device="cuda"))
 
-        self.inv_sqrt_pi = np.power(1.0 / np.sqrt(2.0 * np.pi), d)
-
         self.covariances = gaussians.build_covariances(self.initial_scaling, self.initial_transform)
         self.initial_conics = torch.inverse(self.covariances)
-        self.initial_inv_sqrt_det = self.inv_sqrt_pi * torch.sqrt(torch.det(self.initial_conics))
 
         if problem == Problem.POISSON:
             self.initial_u = torch.zeros((nx, ny), device="cuda")
-            # u = torch.sin(np.pi * (means[...,0] + 1.0))
-            # u = torch.sin(np.pi * (means[...,0] + 1.0) * (means[...,1] + 1.0))
         elif problem == Problem.WAVE:
-            self.initial_u = torch.zeros((nx, ny, 2), device="cuda")
+            self.channels = 2
+            self.initial_u = torch.zeros((nx, ny, self.channels), device="cuda")
             self.initial_u[nx//2-1,ny//2-1,0] = 1.0
             self.initial_u[nx//2-1,ny//2,0] = 1.0
             self.initial_u[nx//2,ny//2-1,0] = 1.0
@@ -125,14 +121,8 @@ class Model(nn.Module):
         self.gaussian_model = Network(
             self.channels, out_channels, self.kernel_size, nn.SiLU()).cuda()
 
-        if self.problem == Problem.WAVE:
-            self.solution_model1 = Network(
-                self.channels, 1, self.kernel_size, nn.Tanh()).cuda()
-            self.solution_model2 = Network(
-                self.channels, 1, self.kernel_size, nn.Tanh()).cuda()
-        else:
-            self.solution_model = Network(
-                self.channels, self.channels, self.kernel_size, nn.Tanh()).cuda()
+        self.solution_model = Network(
+            self.channels, self.channels, self.kernel_size, nn.Tanh()).cuda()
 
         self.reset()
 
@@ -145,7 +135,6 @@ class Model(nn.Module):
         self.raw_opacities = torch.zeros(self.opacities.shape, device="cuda")
         self.covariances = gaussians.build_covariances(self.scaling, self.transform)
         self.conics = self.initial_conics
-        self.inv_sqrt_det = self.initial_inv_sqrt_det
 
         self.clear()
 
@@ -165,32 +154,21 @@ class Model(nn.Module):
         self.raw_opacities = self.raw_opacities.detach()
         self.covariances = self.covariances.detach()
         self.conics = self.conics.detach()
-        self.inv_sqrt_det = self.inv_sqrt_det.detach()
 
     def forward(self):
         in_samples = gaussians.sample_gaussians_region(
-            self.means, self.inv_sqrt_det, self.conics, self.opacities, self.u,
-            self.means, (self.kernel_size, self.kernel_size), (self.dx, self.dx)
-        ) # nx*ny*k*k, nx, ny, c
+            self.means, self.conics, self.opacities, self.u, self.means,
+            (self.kernel_size, self.kernel_size), (self.dx, self.dx)
+        ) # nx*ny*k*k, c
         in_samples = in_samples.reshape(
-            self.nx * self.ny, self.kernel_size * self.kernel_size, self.nx * self.ny, self.channels
-        ).sum(-2).transpose(-1, -2).reshape(
+            self.nx * self.ny, self.kernel_size * self.kernel_size, self.channels
+        ).transpose(-1, -2).reshape(
             self.nx * self.ny, self.channels, self.kernel_size, self.kernel_size
         ) # nx*ny, c, k, k
 
-        if self.problem == Problem.WAVE:
-            delta1 = self.solution_model1(
-                in_samples, self.means.reshape(self.nx * self.ny, self.d)
-            ).reshape(self.nx, self.ny, 1)
-            delta2 = self.solution_model2(
-                in_samples, self.means.reshape(self.nx * self.ny, self.d)
-            ).reshape(self.nx, self.ny, 1)
-
-            deltas = torch.cat((delta1, delta2), dim=-1)
-        else:
-            deltas = self.solution_model(
-                in_samples, self.means.reshape(self.nx * self.ny, self.d)
-            ).reshape(self.nx, self.ny, self.channels)
+        deltas = self.solution_model(
+            in_samples, self.means.reshape(self.nx * self.ny, self.d)
+        ).reshape(self.nx, self.ny, self.channels)
 
         self.u = self.u + deltas
 
@@ -199,52 +177,46 @@ class Model(nn.Module):
         ).reshape(self.nx, self.ny, -1)
 
         self.translation = z[...,:self.d]
-        self.means = self.means + self.translation
+        # self.means = self.means + self.translation
 
         self.dscale = z[...,self.d:2*self.d]
         scale = torch.exp(self.dscale)
-        self.scaling = self.scaling * scale
+        # self.scaling = self.scaling * scale
 
         self.dtransform = z[...,2*self.d:2*self.d + self.transform_size]
-        self.transform = self.transform + self.dtransform
+        # self.transform = self.transform + self.dtransform
 
         if self.train_opacity:
             self.dopacities = z[...,2*self.d + self.transform_size]
-            self.raw_opacities = self.raw_opacities + self.dopacities
+            # self.raw_opacities = self.raw_opacities + self.dopacities
             self.opacities = torch.sigmoid(self.raw_opacities)
 
         self.covariances = gaussians.build_covariances(self.scaling, self.transform)
         self.conics = torch.inverse(self.covariances)
-        self.inv_sqrt_det = self.inv_sqrt_pi * torch.sqrt(torch.det(self.conics))
 
     def sample(self, samples, bc_samples):
-        # ut = gaussians.sample_gaussians(
-        #     self.means, self.inv_sqrt_det, self.conics, self.opacities, self.deltas, samples
-        # ) # n, nx, ny, c
-        ux = gaussians.gaussian_derivative(
-            self.means, self.inv_sqrt_det, self.conics, self.opacities, self.u, samples
-        ) # n, nx, ny, d, c
-        uxx = gaussians.gaussian_derivative2(
-            self.means, self.inv_sqrt_det, self.conics, self.opacities, self.u, samples
-        ) # n, nx, ny, d, d, c
         u_sample = gaussians.sample_gaussians(
-            self.means, self.inv_sqrt_det, self.conics, self.opacities, self.u, samples
-        ) # n, nx, ny, c
+            self.means, self.conics, self.opacities, self.u, samples
+        ) # n, c
         bc_u_sample = gaussians.sample_gaussians(
-            self.means, self.inv_sqrt_det, self.conics, self.opacities, self.u, bc_samples
-        ) # n, nx, ny, c
+            self.means, self.conics, self.opacities, self.u, bc_samples
+        ) # n, c
 
-        # ut = ut.sum((1,2)) # n, c
-        ux = ux.sum((1,2)) # n, d, c
-        uxx = uxx.sum((1,2)) # n, d, d, c
-        u_sample = u_sample.sum((1,2)) # n, c
-        bc_u_sample = bc_u_sample.sum((1,2)) # n, c
+        ux = torch.autograd.grad(u_sample.sum(), samples, retain_graph=True, create_graph=True)[0]
+        uxx_x = torch.autograd.grad(ux[:,0].sum(), samples, retain_graph=True)[0]
+        uxx_y = torch.autograd.grad(ux[:,1].sum(), samples)[0]
+        uxx = torch.cat((uxx_x, uxx_y), dim=-1)
+        # ux = gaussians.gaussian_derivative(
+        #     self.means, self.conics, self.opacities, self.u, samples
+        # ) # n, d, c
+        # uxx = gaussians.gaussian_derivative2(
+        #     self.means, self.conics, self.opacities, self.u, samples
+        # ) # n, d, d, c
 
-        # self.ut_samples.append(ut)
-        self.ux_samples.append(ux)
-        self.uxx_samples.append(uxx)
         self.u_samples.append(u_sample)
         self.bc_u_samples.append(bc_u_sample)
+        self.ux_samples.append(ux)
+        self.uxx_samples.append(uxx)
 
     def compute_loss(self, t, samples, time_samples, bc_samples):
         self.sample(samples, bc_samples)
@@ -276,17 +248,20 @@ class Model(nn.Module):
 
         if self.problem == Problem.DIFFUSION:
             pde_loss += torch.mean((ut - (uxx[:,0,0] + uxx[:,1,1])) ** 2)
+
         elif self.problem == Problem.BURGERS:
-            pde_loss += torch.mean((ut + u_sample * ux[:,0] - self.nu * (uxx[:,0,0] + uxx[:,1,1])) ** 2)
+            pde_loss += \
+                torch.mean((ut + u_sample * ux[:,0] - self.nu * (uxx[:,0,0] + uxx[:,1,1])) ** 2)
+
         elif self.problem == Problem.POISSON:
             x = samples[...,0]
             pde_loss += torch.mean((uxx[:,0,0] - 100.0 * t * torch.sin(np.pi * (x + 1.0))) ** 2)
+
         elif self.problem == Problem.WAVE:
             pde_loss += torch.mean((ut[...,0] - u_sample[...,1]) ** 2)
             pde_loss += 0.01 * torch.mean(
                 (ut[...,1] - 10 * (uxx[...,0,0,0] + uxx[...,1,1,0]) + 0.1 * u_sample[...,1]) ** 2)
-            # print(torch.mean((ut[...,0] - u_sample[...,1]) ** 2) / torch.mean(
-            #     (ut[...,1] - 10 * (uxx[...,0,0,0] + uxx[...,1,1,0]) + 0.1 * u_sample[...,1]) ** 2))
+
         else:
             raise ValueError("Unexpected PDE problem:", self.problem)
 
@@ -304,42 +279,42 @@ class Model(nn.Module):
     def generate_images(self, res):
         if self.problem == Problem.WAVE:
             img1 = gaussians.sample_gaussians_img(
-                self.initial_means, self.initial_inv_sqrt_det, self.initial_conics,
+                self.initial_means, self.initial_conics,
                 self.initial_opacities, self.initial_u[...,0], res, res
             ).detach().cpu().numpy()
 
             img2 = gaussians.sample_gaussians_img(
-                self.initial_means, self.initial_inv_sqrt_det, self.initial_conics,
+                self.initial_means, self.initial_conics,
                 self.initial_opacities, self.initial_u[...,1], res, res
             ).detach().cpu().numpy()
 
             img3 = gaussians.sample_gaussians_img(
-                self.means, self.inv_sqrt_det, self.conics,
+                self.means, self.conics,
                 self.opacities, self.u[...,0], res, res
             ).detach().cpu().numpy()
 
             img4 = gaussians.sample_gaussians_img(
-                self.means, self.inv_sqrt_det, self.conics,
+                self.means, self.conics,
                 self.opacities, self.u[...,1], res, res
             ).detach().cpu().numpy()
         else:
             img1 = gaussians.sample_gaussians_img(
-                self.initial_means, self.initial_inv_sqrt_det, self.initial_conics,
+                self.initial_means, self.initial_conics,
                 self.initial_opacities, self.initial_u, res, res
             ).detach().cpu().numpy()
 
             img2 = gaussians.sample_gaussians_img(
-                self.means, self.inv_sqrt_det, self.conics,
+                self.means, self.conics,
                 self.opacities, self.u, res, res
             ).detach().cpu().numpy()
 
             img3 = gaussians.sample_gaussians_img(
-                self.initial_means, self.initial_inv_sqrt_det, self.initial_conics,
+                self.initial_means, self.initial_conics,
                 self.opacities, self.u, res, res
             ).detach().cpu().numpy()
 
             img4 = gaussians.sample_gaussians_img(
-                self.means, self.inv_sqrt_det, self.conics,
+                self.means, self.conics,
                 self.initial_opacities, self.initial_u, res, res
             ).detach().cpu().numpy()
 
