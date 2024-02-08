@@ -14,84 +14,86 @@ d = 2
 tx = torch.linspace(-1, 1, nx).cuda()
 ty = torch.linspace(-1, 1, ny).cuda()
 gx, gy = torch.meshgrid((tx,ty), indexing="ij")
-means = torch.stack((gx,gy), dim=-1)
-scaling = torch.ones((nx,ny,d), device="cuda") * -4.0
+means = torch.stack((gx,gy), dim=-1).reshape(nx*ny, d)
+scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
 scaling = torch.exp(scaling)
-transform = torch.zeros((nx,ny,d * (d - 1) // 2), device="cuda")
+transform = torch.zeros((nx*ny,d * (d - 1) // 2), device="cuda")
 transform = f.tanh(transform)
-opacities = torch.ones((nx,ny), device="cuda") * 0.25
+opacities = torch.ones((nx*ny), device="cuda") * 0.25
 
 covariances = gaussians.build_covariances(scaling, transform)
 conics = torch.inverse(covariances)
 
-sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, 1, d, 1)
+sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, d, 1)
 samples = means.unsqueeze(-1) - sample_mean
 conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1)
 powers = -0.5 * (samples.transpose(-1, -2) @ (conics @ samples))
-u = torch.exp(powers).squeeze(-1)
-u = u / torch.max(u)
+values = torch.exp(powers).squeeze(-1)
+values = values / torch.max(values)
 
-gaussians.plot_gaussians(means, covariances, opacities, u)
+values = values.reshape(nx*ny, 1)
+
+gaussians.plot_gaussians(means, covariances, opacities, values)
 plt.savefig("plot_gaussians1.png")
 
 img1 = gaussians.sample_gaussians_img(
-    means, conics, opacities, u, res, res).detach().cpu().numpy()
+    means, conics, opacities, values, res, res, 1.0).detach().cpu().numpy()
 
-random_opacities = torch.rand((nx,ny), device="cuda") * 0.8 + 0.1
+random_opacities = torch.rand((nx*ny), device="cuda") * 0.8 + 0.1
 
-gaussians.plot_gaussians(means, covariances, random_opacities, u)
+gaussians.plot_gaussians(means, covariances, random_opacities, values)
 plt.savefig("plot_gaussians2.png")
 
 img2 = gaussians.sample_gaussians_img(
-    means, conics, random_opacities, u, res, res).detach().cpu().numpy()
+    means, conics, random_opacities, values, res, res, 1.0).detach().cpu().numpy()
 
-random_means = torch.stack((gx,gy), dim=-1) + (torch.rand((nx, ny, d), device="cuda") * 2.0 - 1.0) * 0.1
+random_means = means + (torch.rand((nx*ny, d), device="cuda") * 2.0 - 1.0) * 0.1
 
 random_covariances = gaussians.build_covariances(scaling, transform)
 random_conics = torch.inverse(random_covariances)
 
-sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, 1, d, 1)
+sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, d, 1)
 samples = random_means.unsqueeze(-1) - sample_mean
 random_conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1)
 powers = -0.5 * (samples.transpose(-1, -2) @ (random_conics @ samples))
-random_u = torch.exp(powers).squeeze(-1)
-random_u = random_u / torch.max(random_u)
+random_values = torch.exp(powers).squeeze(-1)
+random_values = random_values / torch.max(random_values)
 
-gaussians.plot_gaussians(random_means, random_covariances, opacities, random_u)
+gaussians.plot_gaussians(random_means, random_covariances, opacities, random_values)
 plt.savefig("plot_gaussians3.png")
 
 img3 = gaussians.sample_gaussians_img(
-    random_means, random_conics, opacities, random_u, res, res).detach().cpu().numpy()
+    random_means, random_conics, opacities, random_values, res, res, 1.0).detach().cpu().numpy()
 
-scaling = (torch.rand((nx,ny,d), device="cuda") * 2.0 - 1.0) * 0.5 - 4.0
+scaling = (torch.rand((nx*ny,d), device="cuda") * 2.0 - 1.0) * 0.5 - 4.0
 scaling = torch.exp(scaling)
 
 random_covariances = gaussians.build_covariances(scaling, transform)
 random_conics = torch.inverse(random_covariances)
 
-gaussians.plot_gaussians(random_means, random_covariances, opacities, random_u)
+gaussians.plot_gaussians(random_means, random_covariances, opacities, random_values)
 plt.savefig("plot_gaussians4.png")
 
 img4 = gaussians.sample_gaussians_img(
-    random_means, random_conics, opacities, random_u, res, res).detach().cpu().numpy()
+    random_means, random_conics, opacities, random_values, res, res, 1.0).detach().cpu().numpy()
 
-transform = (torch.rand((nx,ny,d * (d - 1) // 2), device="cuda") * 2.0 - 1.0)
+transform = (torch.rand((nx*ny,d * (d - 1) // 2), device="cuda") * 2.0 - 1.0)
 transform = f.tanh(transform)
 
 random_covariances = gaussians.build_covariances(scaling, transform)
 random_conics = torch.inverse(random_covariances)
 
-gaussians.plot_gaussians(random_means, random_covariances, opacities, random_u)
+gaussians.plot_gaussians(random_means, random_covariances, opacities, random_values)
 plt.savefig("plot_gaussians5.png")
 
 img5 = gaussians.sample_gaussians_img(
-    random_means, random_conics, opacities, random_u, res, res).detach().cpu().numpy()
+    random_means, random_conics, opacities, random_values, res, res, 1.0).detach().cpu().numpy()
 
-gaussians.plot_gaussians(means, random_covariances, opacities, u)
+gaussians.plot_gaussians(means, random_covariances, opacities, values)
 plt.savefig("plot_gaussians6.png")
 
 img6 = gaussians.sample_gaussians_img(
-    means, random_conics, opacities, u, res, res).detach().cpu().numpy()
+    means, random_conics, opacities, values, res, res, 1.0).detach().cpu().numpy()
 
 vmin = min(np.min(img1), np.min(img2), np.min(img3), np.min(img4), np.min(img5), np.min(img6))
 vmax = max(np.max(img1), np.max(img2), np.max(img3), np.max(img4), np.max(img5), np.max(img6))

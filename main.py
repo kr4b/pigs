@@ -13,16 +13,18 @@ import model
 
 from model import *
 
-dt = 1
-dx = 0.05
+dt = 0.1
+dx = 0.01
 
-train_timesteps = 10
+train_timesteps = 20
 cutoff_timesteps = 2
-test_timesteps = 20
+test_timesteps = 30
 
-n_samples = 100
+scale = 1.0
 
-nx = ny = 20
+n_samples = 200
+
+nx = ny = 50
 d = 2
 
 kernel_size = 5
@@ -30,7 +32,7 @@ kernel_size = 5
 train_opacity = True
 
 model = Model(
-    Problem.WAVE,
+    Problem.NAVIER_STOKES,
     nx, ny, d, dx, dt, kernel_size,
     IntegrationRule.TRAPEZOID,
     train_opacity
@@ -53,7 +55,7 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
 
     torch.autograd.set_detect_anomaly(True)
 
-    N = 1000
+    N = 2000
     log_step = 10
     save_step = 100
     bootstrap_rate = 20
@@ -64,14 +66,27 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
 
     for epoch in range(start, N):
         time_samples = torch.rand(n_samples, device="cuda")
-        samples = torch.rand((n_samples, 2), device="cuda") * 2.0 - 1.0
+        samples = (torch.rand((n_samples, d), device="cuda", requires_grad=True) * 2.0 - 1.0) * scale
 
-        boundaries = torch.cat((-torch.ones(n_samples // 4, device="cuda"), torch.ones(n_samples // 4, device="cuda")))
-        bc_samples = torch.zeros((n_samples, 2), device="cuda")
-        bc_samples[n_samples // 2:,0] = torch.rand(n_samples // 2, device="cuda") * 2.0 - 1.0
-        bc_samples[n_samples // 2:,1] = boundaries
-        bc_samples[:n_samples // 2,1] = torch.rand(n_samples // 2, device="cuda") * 2.0 - 1.0
+        boundaries = torch.cat((
+            -torch.ones(n_samples//4, device="cuda") - torch.rand(n_samples//4, device="cuda") * 0.5,
+            torch.ones(n_samples//4, device="cuda") + torch.rand(n_samples//4, device="cuda") * 0.5
+        )) * scale
+        if model.problem == Problem.NAVIER_STOKES:
+            bc_samples = torch.zeros((n_samples + n_samples // 4, d), device="cuda")
+        else:
+            bc_samples = torch.zeros((n_samples, d), device="cuda")
+
+        bc_samples[n_samples // 2:n_samples,0] = \
+            (torch.rand(n_samples // 2, device="cuda") * 2.0 - 1.0) * 1.5 * scale
+        bc_samples[n_samples // 2:n_samples,1] = boundaries
+        bc_samples[:n_samples // 2,1] = \
+            (torch.rand(n_samples // 2, device="cuda") * 2.0 - 1.0) * 1.5 * scale
         bc_samples[:n_samples // 2,0] = boundaries
+
+        if model.problem == Problem.NAVIER_STOKES:
+            bc_samples[n_samples:,:] = \
+                (torch.rand((n_samples // 4, d), device="cuda") * 2.0 - 1.0) * 0.1
 
         loss = torch.zeros(1, device="cuda")
         pde_loss = torch.zeros(1, device="cuda")
@@ -171,41 +186,12 @@ with torch.no_grad():
     for i in range(test_timesteps):
         t = i * dt
 
-        # tx = torch.linspace(-2, 2, res).cuda()
-        # ty = torch.linspace(-2, 2, res).cuda()
-        # gx, gy = torch.meshgrid((tx, ty), indexing="xy")
-        # img_samples = torch.stack((gx, gy), dim=-1).reshape(res * res, 2)
-        # img_samples.requires_grad = True
-
-        # u = gaussians.sample_gaussians(
-        #     model.means, model.conics, model.opacities, model.u, img_samples
-        # )#.sum(dim=(1,2)).reshape(res, res, 2).detach().cpu().numpy()
-
-        # us.append(u)
-
-        # uxx = gaussians.gaussian_derivative2(
-        #     model.means, model.conics, model.opacities, model.u, img_samples
-        # ).sum(dim=(1,2)).reshape(res, res, 2, 2, 2).detach().cpu().numpy()
-
-        # grad1 = torch.autograd.grad(u[...,0].sum(), img_samples, retain_graph=True, create_graph=True)[0]
-        # grad2_1 = torch.autograd.grad(grad1[:,0].sum(), img_samples, retain_graph=True)[0]
-        # grad2_2 = torch.autograd.grad(grad1[:,1].sum(), img_samples, retain_graph=True)[0]
-        # uxx0 = torch.cat((grad2_1, grad2_2), dim=-1)
-        # grad1 = torch.autograd.grad(u[...,1].sum(), img_samples, retain_graph=True, create_graph=True)[0]
-        # grad2_1 = torch.autograd.grad(grad1[:,0].sum(), img_samples, retain_graph=True)[0]
-        # grad2_2 = torch.autograd.grad(grad1[:,1].sum(), img_samples)[0]
-        # uxx1 = torch.cat((grad2_1, grad2_2), dim=-1)
-
-        # uxx = torch.cat((uxx0, uxx1), dim=-1).reshape(res, res, 2, 2, 2).transpose(-3, -1).detach().cpu().numpy()
-
-        # uxxs.append(uxx)
-
         fig = model.plot_gaussians()
         plt.savefig("results/gaussians_plot{}.png".format(i))
         plt.close(fig)
 
         with torch.no_grad():
-            img1, img2, img3, img4 = model.generate_images(res)
+            img1, img2, img3, img4 = model.generate_images(res, scale)
             model.forward()
 
         imgs1.append(img1)
@@ -213,7 +199,7 @@ with torch.no_grad():
         imgs3.append(img3)
         imgs4.append(img4)
 
-    for i in range(test_timesteps):
+    for i in range(train_timesteps):
         vmax = max(vmax, np.max(imgs1[i]), np.max(imgs2[i]), np.max(imgs3[i]), np.max(imgs4[i]))
         vmin = min(vmin, np.min(imgs1[i]), np.min(imgs2[i]), np.min(imgs3[i]), np.min(imgs4[i]))
 
@@ -230,8 +216,6 @@ with torch.no_grad():
             ax[0,1].set_title("Full")
             ax[1,0].set_title("Only u")
             ax[1,1].set_title("Only G")
-        # im = ax[0,0].imshow(uxxs[i][...,0,0,0] + uxxs[i][...,1,1,0], vmin=vmin, vmax=vmax)
-        # im = ax[0,1].imshow(uxxs[i][...,0,0,1] + uxxs[i][...,1,1,1], vmin=vmin, vmax=vmax)
         im = ax[0,0].imshow(imgs1[i], vmin=vmin, vmax=vmax)
         im = ax[0,1].imshow(imgs2[i], vmin=vmin, vmax=vmax)
         if i > 0:
@@ -242,5 +226,5 @@ with torch.no_grad():
         cbar_ax = fig.add_axes([0.9, 0.1, 0.025, 0.8])
         fig.colorbar(im, cax=cbar_ax)
         plt.tight_layout()
-        plt.savefig("results/results{}.png".format(i))
+        plt.savefig("results/results{}.png".format(i), dpi=200)
         plt.close(fig)
