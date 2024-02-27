@@ -2,7 +2,6 @@ import time
 
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.stats as st
 import torch
 import torch.nn.functional as f
 
@@ -19,16 +18,16 @@ d = 2
 tx = torch.linspace(-1, 1, nx).cuda()
 ty = torch.linspace(-1, 1, ny).cuda()
 gx, gy = torch.meshgrid((tx,ty), indexing="ij")
-means = torch.stack((gx,gy), dim=-1)
-scaling = torch.ones((nx,ny,d), device="cuda") * -4.0# + 0.5 * torch.linspace(0, 1, nx).cuda().reshape(nx, 1, 1).repeat(1, ny, d)
-transform = torch.zeros((nx,ny, d * (d - 1) // 2), device="cuda")
+means = torch.stack((gx,gy), dim=-1).reshape(nx*ny, d)
+scaling = torch.ones((nx*ny,d), device="cuda") * -4.0# + 0.5 * torch.linspace(0, 1, nx).cuda().reshape(nx, 1, 1).repeat(1, ny, d)
+transform = torch.zeros((nx*ny, d * (d - 1) // 2), device="cuda")
 # for i in range(ny):
 #     for j in range(nx):
 #         transform[j,i,0] = 0.5 + i * j * 0.01
-opacities = torch.ones((nx,ny), device="cuda") * 0.5
+opacities = torch.ones((nx*ny), device="cuda") * 0.5
 conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1)
 
-sample_mean = torch.tensor([0.1, 0.4], device="cuda").reshape(1, 1, d, 1)
+sample_mean = torch.tensor([0.1, 0.4], device="cuda").reshape(1, d, 1)
 samples = means.unsqueeze(-1) - sample_mean
 powers = -0.5 * (samples.transpose(-1, -2) @ (conics @ samples))
 values = torch.exp(powers).squeeze(-1)
@@ -56,13 +55,8 @@ print("Original:", time.time() - start)
 sampler = GaussianSampler(True)
 
 start = time.time()
-result_cuda = sampler(
-    means = means.reshape(-1, d),
-    values = values.reshape(-1, 1),
-    covariances = covariances.reshape(-1, d, d),
-    conics = conics.reshape(-1, d, d),
-    opacities = opacities.reshape(-1),
-    samples = samples.reshape(-1, d))
+sampler.preprocess(means, values, covariances, conics, opacities, samples)
+result_cuda = sampler.sample_gaussians()
 img_cuda = result_cuda.reshape(res, res).detach().cpu().numpy()
 print("CUDA:", time.time() - start)
 

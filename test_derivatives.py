@@ -1,6 +1,5 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.stats as st
 import torch
 import torch.nn.functional as f
 
@@ -14,8 +13,10 @@ nx = 20
 ny = 20
 d = 2
 
-tx = torch.linspace(-1, 1, nx).cuda()
-ty = torch.linspace(-1, 1, ny).cuda()
+scale = 1.0
+
+tx = torch.linspace(-1, 1, nx).cuda() * scale
+ty = torch.linspace(-1, 1, ny).cuda() * scale
 gx, gy = torch.meshgrid((tx,ty), indexing="ij")
 means = torch.stack((gx,gy), dim=-1).reshape(nx, ny, d)
 scaling = torch.ones((nx,ny,d), device="cuda") * -5.0
@@ -55,8 +56,8 @@ covariances = gaussians.build_covariances(scaling, transform)
 conics = torch.inverse(covariances)
 
 res = 32
-tx = torch.linspace(-1, 1, res).cuda()
-ty = torch.linspace(-1, 1, res).cuda()
+tx = torch.linspace(-1, 1, res).cuda() * scale
+ty = torch.linspace(-1, 1, res).cuda() * scale
 gx, gy = torch.meshgrid((tx, ty), indexing="xy")
 samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
 
@@ -82,8 +83,8 @@ sampler = GaussianSampler(True)
 sampler.preprocess(means, values, covariances, conics, opacities, samples)
 result_cuda = sampler.sample_gaussians()
 
-#input_img = result_py.reshape(res, res).detach().cpu().numpy()
-input_img = (-2*samples.reshape(res,res,2) * (samples.unsqueeze(-1).transpose(-2, -1) @ samples.unsqueeze(-1)).reshape(res,res,1)).detach().cpu().numpy()
+input_img = result_py.reshape(res, res).detach().cpu().numpy()
+# input_img = (-2*samples.reshape(res,res,2) * (samples.unsqueeze(-1).transpose(-2, -1) @ samples.unsqueeze(-1)).reshape(res,res,1)).detach().cpu().numpy()
 
 fig = plt.figure()
 plt.imshow(input_img[...,0])
@@ -100,7 +101,7 @@ for i in range(len(grad_x_cuda_auto)):
 
 assert(torch.allclose(grad_x_cuda_auto[-1], grad_x_cuda, atol=10e-4))
 
-h = 2 / (res - 1)
+h = scale * 2 / (res - 1)
 img_fd_x = (input_img[1:-1,1:-1] - input_img[1:-1,:-2]) / h
 img_fd_y = (input_img[1:-1,1:-1] - input_img[:-2,1:-1]) / h
 img_fd = np.stack((img_fd_x, img_fd_y), axis=2)

@@ -1,5 +1,4 @@
 import matplotlib.pyplot as plt
-import scipy.stats as st
 import torch
 import torch.nn.functional as f
 

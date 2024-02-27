@@ -1,7 +1,6 @@
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.stats as st
 import torch
 import torch.nn.functional as f
 
@@ -12,7 +11,7 @@ from matplotlib.patches import Ellipse
 
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
-def plot_gaussians(means, covariances, opacities, values):
+def plot_gaussians(means, covariances, opacities, values, scale=1.0):
     n, d = means.shape
 
     means = means.cpu().numpy()
@@ -34,7 +33,9 @@ def plot_gaussians(means, covariances, opacities, values):
 
         ax.add_patch(ellipse)
 
-    plt.axis("scaled")
+    plt.axis((-scale * 1.25, scale * 1.25, -scale * 1.25, scale * 1.25))
+    plt.gca().set_aspect("equal", adjustable="box")
+    # plt.axis("scaled")
     # plt.axis("off")
     return fig
 
@@ -163,12 +164,19 @@ def build_covariances(s, t):
     t = torch.tanh(t)
     S = torch.diag_embed(s)
     T = torch.diag_embed(torch.zeros(s.shape, device="cuda"))
+    # c = torch.cos(t).squeeze()
+    # s = torch.sin(t).squeeze()
+    # T[:,0,0] = c
+    # T[:,1,1] = c
+    # T[:,0,1] = -s
+    # T[:,1,0] = s
     indices = torch.tril_indices(s.shape[-1], s.shape[-1], -1)
 
     T[..., indices[0], indices[1]] = t
     T = T + torch.diag_embed(torch.ones(s.shape, device="cuda"))
 
     return T @ S @ torch.transpose(T, -1, -2)
+    # return T @ S
 
 
 import unittest
