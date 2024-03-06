@@ -14,9 +14,9 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 def plot_gaussians(means, covariances, opacities, values, scale=1.0):
     n, d = means.shape
 
-    means = means.cpu().numpy()
-    values = values.cpu().numpy()
-    opacities = opacities.cpu().numpy()
+    means = means.detach().cpu().numpy()
+    values = values.detach().cpu().numpy()
+    opacities = opacities.detach().cpu().numpy()
     covariances = covariances.detach().cpu().numpy()
     covariance = np.zeros((covariances.shape[0], 3, 3))
     covariance[:,:d,:d] = covariances
@@ -25,9 +25,14 @@ def plot_gaussians(means, covariances, opacities, values, scale=1.0):
     fig = plt.figure()
     ax = fig.gca()
 
+    vmin = np.min(values)
+    vmax = np.max(values)
+
     for i in range(n):
         color = matplotlib.cm.get_cmap("viridis")
-        ellipse = Ellipse(xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(values[i,0]), alpha=opacities[i].item())
+        v = (values[i,0] - vmin) / vmax
+        ellipse = Ellipse(
+            xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(v), alpha=opacities[i].item())
         affine = Affine2D(covariance[i]).translate(*means[i,:2])
         ellipse.set_transform(affine + ax.transData)
 
