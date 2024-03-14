@@ -9,14 +9,13 @@ from torch import nn
 from matplotlib.transforms import Affine2D
 from matplotlib.patches import Ellipse
 
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+# from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 
-def plot_gaussians(means, covariances, opacities, values, scale=1.0):
+def plot_gaussians(means, covariances, values, scale=1.0):
     n, d = means.shape
 
     means = means.detach().cpu().numpy()
     values = values.detach().cpu().numpy()
-    opacities = opacities.detach().cpu().numpy()
     covariances = covariances.detach().cpu().numpy()
     covariance = np.zeros((covariances.shape[0], 3, 3))
     covariance[:,:d,:d] = covariances
@@ -32,7 +31,7 @@ def plot_gaussians(means, covariances, opacities, values, scale=1.0):
         color = matplotlib.cm.get_cmap("viridis")
         v = (values[i,0] - vmin) / vmax
         ellipse = Ellipse(
-            xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(v), alpha=opacities[i].item())
+            xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(v), alpha=0.4)
         affine = Affine2D(covariance[i]).translate(*means[i,:2])
         ellipse.set_transform(affine + ax.transData)
 
@@ -44,17 +43,15 @@ def plot_gaussians(means, covariances, opacities, values, scale=1.0):
     # plt.axis("off")
     return fig
 
-def sample_gaussians(means, conics, opacities, values, samples):
+def sample_gaussians(means, conics, values, samples):
     n, d = means.shape
 
     x = samples.reshape(-1, 1, d, 1) - means.reshape(1, n, d, 1)
     powers = -0.5 * (x.transpose(-1, -2) @ (conics @ x))
     densities = torch.exp(powers).reshape(-1, n, 1)
 
-    opacities = opacities.reshape(1, n, 1)
     values = values.reshape(1, n, -1)
-
-    res = densities * opacities * values
+    res = densities * values
 
     return res.sum(1)
 
@@ -66,12 +63,12 @@ def region_kernel(size, dx, d):
     grid = torch.meshgrid(td, indexing="xy")
     return torch.stack(grid, dim=-1).reshape(-1, d)
 
-def sample_gaussians_region(means, conics, opacities, values, center, size, dx):
+def sample_gaussians_region(means, conics, values, center, size, dx):
     n, d = means.shape
     samples = _sample_gaussians_region(d, center, size, dx)
-    return sample_gaussians(means, conics, opacities, values, samples)
+    return sample_gaussians(means, conics, values, samples)
 
-def sample_gaussians_img(means, conics, opacities, values, w, h, scale):
+def sample_gaussians_img(means, conics, values, w, h, scale):
     n, d = means.shape
 
     tx = torch.linspace(-1, 1, w).cuda() * scale
@@ -83,11 +80,11 @@ def sample_gaussians_img(means, conics, opacities, values, w, h, scale):
     if d == 2:
         samples = torch.stack((gx, gy), dim=-1).reshape(w * h, d)
 
-    img = sample_gaussians(means, conics, opacities, values, samples)
+    img = sample_gaussians(means, conics, values, samples)
 
     return img.reshape(w, h, -1)
 
-def gaussian_derivative(means, conics, opacities, values, samples):
+def gaussian_derivative(means, conics, values, samples):
     n, d = means.shape
 
     x = samples.reshape(-1, 1, d, 1) - means.reshape(1, n, d, 1)
@@ -96,14 +93,12 @@ def gaussian_derivative(means, conics, opacities, values, samples):
     densities = torch.exp(powers).reshape(-1, n, 1, 1)
     derivatives = -inv_prod.reshape(-1, n, d, 1) * densities
 
-    opacities = opacities.reshape(1, n, 1, 1)
     values = values.reshape(1, n, 1, -1)
-
-    res = derivatives * opacities * values
+    res = derivatives * values
 
     return res.sum(1)
 
-def gaussian_derivative2(means, conics, opacities, values, samples):
+def gaussian_derivative2(means, conics, values, samples):
     n, d = means.shape
 
     x = samples.reshape(-1, 1, d, 1) - means.reshape(1, n, d, 1)
@@ -113,57 +108,55 @@ def gaussian_derivative2(means, conics, opacities, values, samples):
     ones = torch.ones(x.shape, device="cuda")
     derivatives = (inv_prod @ inv_prod.transpose(-1, -2) - conics).reshape(-1, n, d, d, 1) * densities
 
-    opacities = opacities.reshape(1, n, 1, 1, 1)
     values = values.reshape(1, n, 1, 1, -1)
-
-    res = derivatives * opacities * values
+    res = derivatives * values
 
     return res.sum(1)
 
-def rasterize_gaussians(means, covariances, opacities, values, w, h):
-    projection = torch.tensor([
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0]
-    ], device="cuda")
-    raster_settings = GaussianRasterizationSettings(
-        image_height = w,
-        image_width = h,
-        tanfovx = 16.0,
-        tanfovy = 16.0,
-        bg = torch.zeros(3, device="cuda"),
-        scale_modifier = 1.0,
-        viewmatrix = torch.diag(torch.ones(4, device="cuda")),
-        projmatrix = projection,
-        sh_degree = 0,
-        campos = torch.zeros(3, device="cuda"),
-        prefiltered = False,
-        debug = False,
-    )
-    rasterizer = GaussianRasterizer(raster_settings=raster_settings)
-    means3D = means.reshape(-1, 3)
-    means2D = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda")
-    covariances = covariances.reshape(-1, 3, 3)
-    cov3D = torch.zeros((covariances.shape[0], 6), dtype=means3D.dtype, device="cuda")
-    cov3D[:,0] = covariances[:,0,0]
-    cov3D[:,1] = covariances[:,0,1]
-    cov3D[:,2] = covariances[:,0,2]
-    cov3D[:,3] = covariances[:,1,1]
-    cov3D[:,4] = covariances[:,1,2]
-    cov3D[:,5] = covariances[:,2,2]
-
-    rendered_image, radii = rasterizer(
-        means3D = means3D,
-        means2D = means2D,
-        shs = None,
-        colors_precomp = values.reshape(-1, 3),
-        opacities = opacities.reshape(-1, 1),
-        scales = None,
-        rotations = None,
-        cov3D_precomp = cov3D)
-
-    return rendered_image.transpose(0, -1)
+# def rasterize_gaussians(means, covariances, opacities, values, w, h):
+#     projection = torch.tensor([
+#         [1.0, 0.0, 0.0, 0.0],
+#         [0.0, 1.0, 0.0, 0.0],
+#         [0.0, 0.0, 1.0, 0.0],
+#         [0.0, 0.0, 0.0, 1.0]
+#     ], device="cuda")
+#     raster_settings = GaussianRasterizationSettings(
+#         image_height = w,
+#         image_width = h,
+#         tanfovx = 16.0,
+#         tanfovy = 16.0,
+#         bg = torch.zeros(3, device="cuda"),
+#         scale_modifier = 1.0,
+#         viewmatrix = torch.diag(torch.ones(4, device="cuda")),
+#         projmatrix = projection,
+#         sh_degree = 0,
+#         campos = torch.zeros(3, device="cuda"),
+#         prefiltered = False,
+#         debug = False,
+#     )
+#     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+#     means3D = means.reshape(-1, 3)
+#     means2D = torch.zeros_like(means3D, dtype=means3D.dtype, requires_grad=True, device="cuda")
+#     covariances = covariances.reshape(-1, 3, 3)
+#     cov3D = torch.zeros((covariances.shape[0], 6), dtype=means3D.dtype, device="cuda")
+#     cov3D[:,0] = covariances[:,0,0]
+#     cov3D[:,1] = covariances[:,0,1]
+#     cov3D[:,2] = covariances[:,0,2]
+#     cov3D[:,3] = covariances[:,1,1]
+#     cov3D[:,4] = covariances[:,1,2]
+#     cov3D[:,5] = covariances[:,2,2]
+# 
+#     rendered_image, radii = rasterizer(
+#         means3D = means3D,
+#         means2D = means2D,
+#         shs = None,
+#         colors_precomp = values.reshape(-1, 3),
+#         opacities = opacities.reshape(-1, 1),
+#         scales = None,
+#         rotations = None,
+#         cov3D_precomp = cov3D)
+# 
+#     return rendered_image.transpose(0, -1)
 
 def build_covariances(s, t):
     t = torch.tanh(t)

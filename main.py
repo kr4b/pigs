@@ -15,29 +15,26 @@ from model import *
 
 from diff_gaussian_sampling import GaussianSampler
 
-dt = 0.1
+dt = 1.0
 dx = 0.05
 
-train_timesteps = 10
-cutoff_timesteps = 2
-test_timesteps = 15
+train_timesteps = 5
+cutoff_timesteps = 1
+test_timesteps = 10
 
 scale = 2.5
 
-nx = ny = 20
+nx = ny = 5
 d = 2
 
 kernel_size = 5
 
-train_opacity = False
-
 torch.manual_seed(0)
 
 model = Model(
-    Problem.DIFFUSION,
+    Problem.WAVE,
     nx, ny, d, dx, dt, kernel_size,
     IntegrationRule.TRAPEZOID,
-    train_opacity,
     scale
 )
 
@@ -62,10 +59,10 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
     torch.autograd.set_detect_anomaly(True)
 
     n_samples = 1024
-    N = 500
+    N = 5000
     log_step = 10
     save_step = 100
-    bootstrap_rate = 40
+    bootstrap_rate = 50
     epsilon = 1
 
     current_timesteps = 1
@@ -147,16 +144,17 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
 
             all_sufficient &= current_loss < 1.0
 
-            if (i+1) % cutoff_timesteps == 0:
-                loss.backward()
-                optim.step()
-                optim.zero_grad()
+            # if (i+1) % cutoff_timesteps == 0:
+            loss.backward()
+            optim.step()
+            optim.zero_grad()
 
-                loss = torch.zeros(1, device="cuda")
+            loss = torch.zeros(1, device="cuda")
 
-                model.detach()
-                model.clear()
-                model.sample(samples, bc_samples)
+            model.optimize()
+            model.detach()
+            model.clear()
+            model.sample(samples, bc_samples)
 
         if all_sufficient:
             current_timesteps = min(epoch // bootstrap_rate + 1, current_timesteps) + 1
@@ -200,7 +198,8 @@ os.makedirs("results", exist_ok=True)
 model.reset()
 model.eval()
 
-with torch.no_grad():
+if True:
+# with torch.no_grad():
     imgs1 = []
     imgs2 = []
     imgs3 = []
@@ -235,15 +234,14 @@ with torch.no_grad():
         imgs3.append(img3)
         imgs4.append(img4)
 
-        sampler.preprocess(
-            model.means, model.u, model.covariances, model.conics,
-            torch.sigmoid(model.opacities), samples)
+        sampler.preprocess(model.means, model.u, model.covariances, model.conics, samples)
 
         uxx = sampler.sample_gaussians_laplacian() # n, d, d, c
         uxxs.append(uxx.reshape(res, res, d, d, -1).detach().cpu().numpy())
 
         if i < test_timesteps:
             model.forward()
+            model.optimize()
 
     for i in range(train_timesteps + 1):
         if model.problem == Problem.WAVE:
