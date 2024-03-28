@@ -3,7 +3,6 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as f
 
 import imageio.v3 as imageio
 
@@ -65,7 +64,7 @@ optim = torch.optim.Adam([
 ])
 
 log_step = 100
-densification_step = log_step * 20 + 1
+densification_step = log_step * 10 + 1
 
 losses = []
 max_mean_grad = []
@@ -74,7 +73,7 @@ max_scale_grad = []
 for i in range(100000):
     samples = torch.rand((1024, 2), device="cuda") * 2.0 - 1.0
 
-    means = f.tanh(raw_means)
+    means = torch.tanh(raw_means)
     scaling = torch.exp(raw_scaling)
     covariances = gaussians.build_covariances(scaling, transform)
     conics = torch.inverse(covariances)
@@ -116,6 +115,12 @@ for i in range(100000):
     optim.zero_grad()
 
     if ((i+1) % densification_step) == 0:
+        means = torch.tanh(raw_means)
+        scaling = torch.exp(raw_scaling)
+        covariances = gaussians.build_covariances(scaling, transform)
+        gaussians.plot_gaussians(means, covariances, values)
+        plt.savefig("initialize_before.png", dpi=200)
+
         with torch.no_grad():
             keep_mask = torch.logical_and(
                 torch.norm(values, dim=-1) > 0.01,
@@ -124,10 +129,18 @@ for i in range(100000):
 
             split_indices = torch.logical_and(mean_grad_norm > 0.01, keep_mask)
             split_len = torch.sum(split_indices).item()
-            split_dir = mean_grad[split_indices]
+
+            # split_dir = mean_grad[split_indices]
+
+            eigvals, eigvecs = torch.linalg.eig(covariances[split_indices])
+            eigval_max, indices = torch.max(eigvals.real.abs(), dim=-1)
+            eigvec_max = torch.gather(
+                eigvecs.real, -1, indices.reshape(-1, 1, 1).expand(eigvals.shape[0], d, 1))
+            pc = eigval_max.reshape(-1, 1) * eigvec_max.squeeze(-1)
+            raw_means.data[split_indices] = raw_means.data[split_indices] - pc
 
             extensions = {
-                "means": raw_means.data[split_indices] + split_dir,
+                "means": raw_means.data[split_indices] + 2 * pc,
                 "values": values.data[split_indices],
                 "scaling": raw_scaling.data[split_indices],
                 "transform": transform.data[split_indices]
@@ -160,11 +173,18 @@ for i in range(100000):
             raw_scaling = new_tensors["scaling"]
             transform = new_tensors["transform"]
 
+        means = torch.tanh(raw_means)
+        scaling = torch.exp(raw_scaling)
+        covariances = gaussians.build_covariances(scaling, transform)
+        gaussians.plot_gaussians(means, covariances, values)
+        plt.savefig("initialize_after.png", dpi=200)
+        exit()
+
     prev_loss = loss.item()
 
-means = f.tanh(raw_means)
+means = torch.tanh(raw_means)
 scaling = torch.exp(raw_scaling)
-transform = f.tanh(transform)
+transform = torch.tanh(transform)
 covariances = gaussians.build_covariances(scaling, transform)
 conics = torch.inverse(covariances)
 

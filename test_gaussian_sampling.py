@@ -3,7 +3,6 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as f
 
 from torch import nn
 
@@ -33,7 +32,7 @@ powers = -0.5 * (samples.transpose(-1, -2) @ (conics @ samples))
 values = torch.exp(powers).squeeze(-1)
 
 scaling = torch.exp(scaling)
-transform = f.tanh(transform)
+transform = torch.tanh(transform)
 
 covariances = gaussians.build_covariances(scaling, transform)
 conics = torch.inverse(covariances)

@@ -5,7 +5,6 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as f
 
 import imageio.v3 as imageio
 
@@ -24,17 +23,16 @@ class Problem(enum.Enum):
 
 os.makedirs("results_no_mlp", exist_ok=True)
 
-res = 32
-nx = ny = 3
+nx = ny = 20
 d = 2
 scale = 2.5
 
 log_step = 100
-densification_step = log_step * 1 + 1
-warm_up = 0
+densification_step = log_step * 3 + 1
+warm_up = 100
 
 nu = 1.0 / (100.0 * np.pi)
-dt = 1.0
+dt = 0.1
 problem = Problem.WAVE
 
 tx = torch.linspace(-1, 1, nx).cuda() * 0.1
@@ -44,12 +42,8 @@ raw_means = torch.atanh(torch.stack((gx,gy), dim=-1).reshape(nx*ny,d))
 raw_scaling = torch.ones((nx*ny,d), device="cuda") * -5.0
 transform = torch.zeros((nx*ny,d * (d - 1) // 2), device="cuda")
 
-if problem == Problem.WAVE:
-    values = torch.zeros((nx*ny,2), device="cuda")
-    c = 2
-else:
-    values = torch.zeros((nx*ny,1), device="cuda")
-    c = 1
+c = 2 if problem == Problem.WAVE else 1
+values = torch.zeros((nx*ny,c), device="cuda")
 
 raw_means = nn.Parameter(raw_means)
 values = nn.Parameter(values)
@@ -64,7 +58,7 @@ torch.autograd.set_detect_anomaly(True)
 parameters = [
     { "name": "means", "params": raw_means, "lr": 1e-2 },
     { "name": "values", "params": values, "lr": 1e-2 },
-    { "name": "scaling", "params": raw_scaling, "lr": 1e-3 },
+    { "name": "scaling", "params": raw_scaling, "lr": 1e-2 },
     { "name": "transform", "params": transform, "lr": 1e-2 }
 ]
 
@@ -73,9 +67,10 @@ all_losses = []
 max_mean_grad = []
 max_scale_grad = []
 
-for i in range(10):
+for i in range(20):
     loss = 1.0
     loss_mean = 1.0
+    loss_std = 1.0
     j = 0
     counter = 0
 
@@ -86,7 +81,7 @@ for i in range(10):
     scale_grad = torch.zeros_like(raw_means, device="cuda")
     scale_grad_norm = torch.zeros(raw_means.shape[0], device="cuda")
 
-    while loss_mean > 1e-4 and j < 5000:
+    while ((i > 0 and loss_mean > 1e-4) or (i == 0 and (np.isnan(loss_std) or loss_std > 0.1))) and j < 5000:
         if problem == Problem.WAVE and i == 0:
             samples = (torch.randn((1024, 2), device="cuda") / 2.0).clamp(-1.0, 1.0) * scale
         else:
@@ -101,7 +96,7 @@ for i in range(10):
                 prev_ux = sampler.sample_gaussians_derivative() # n, d, c
                 prev_uxx = sampler.sample_gaussians_laplacian() # n, d, d, c
 
-        means = f.tanh(raw_means) * scale
+        means = torch.tanh(raw_means) * scale
         scaling = torch.exp(raw_scaling)
         covariances = gaussians.build_covariances(scaling, transform)
         conics = torch.inverse(covariances)
@@ -116,7 +111,7 @@ for i in range(10):
             else:
                 _conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1 * scale)
             powers = -0.5 * (_samples.transpose(-1, -2) @ (_conics @ _samples))
-            desired = torch.exp(powers).squeeze() * 1.5
+            desired = torch.exp(powers).squeeze()
 
             if problem == Problem.WAVE:
                 loss = torch.mean((img[...,1] - desired) ** 2)
@@ -130,11 +125,11 @@ for i in range(10):
             uxx = sampler.sample_gaussians_laplacian() # n, d, d, c
 
             ut = (img - prev_img) / dt
-            #u = img#(img + prev_img) / 2.0
+            # u = prev_img #(img + prev_img) / 2.0
             u = time_samples.reshape(-1,1) * prev_img + (1 - time_samples.reshape(-1,1)) * img
-            #ux = ux#(ux + prev_ux) / 2.0
+            # ux = prev_ux #(ux + prev_ux) / 2.0
             ux = time_samples.reshape(-1,1,1) * prev_ux + (1 - time_samples.reshape(-1,1,1)) * ux
-            #uxx = uxx#(uxx + prev_uxx) / 2.0
+            # uxx = prev_uxx #(uxx + prev_uxx) / 2.0
             uxx = time_samples.reshape(-1,1,1,1) * prev_uxx + (1 - time_samples.reshape(-1,1,1,1)) * uxx
 
             if problem == Problem.WAVE:
@@ -144,9 +139,9 @@ for i in range(10):
                 loss = 0.01 * loss1 + loss2
             elif problem == Problem.BURGERS:
                 loss = torch.mean(
-                    (ut[:,0] - (nu * (uxx[:,0,0] + uxx[:,1,1]) - u[:,0] * ux[:,0])) ** 2)
+                    (ut[:,0] - (nu * (uxx[:,0,0,0] + uxx[:,1,1,0]) - u[:,0] * ux[:,0,0])) ** 2)
             elif problem == Problem.DIFFUSION:
-                loss = torch.mean((ut[:,0] - (uxx[:,0,0] + uxx[:,1,1])) ** 2)
+                loss = torch.mean((ut[:,0] - (uxx[:,0,0,0] + uxx[:,1,1,0])) ** 2)
 
         loss.backward()
         all_losses.append(loss.item())
@@ -171,13 +166,21 @@ for i in range(10):
             print("   loss", loss_mean)
             print("   std", loss_std)
 
-            if loss_std < 0.1:
-                for group in optim.param_groups:
-                    group["lr"] *= 2.0
+            means = torch.tanh(raw_means) * scale
+            scaling = torch.exp(raw_scaling)
+            covariances = gaussians.build_covariances(scaling, transform)
+            conics = torch.inverse(covariances)
+
+            gaussians.plot_gaussians(means, covariances, values[:,1].unsqueeze(-1), scale)
+            plt.savefig("results_no_mlp/initialize_gaussians_{}_{}.png".format(i, j), dpi=200)
+            plt.close("all")
+
+            # if loss_std < 0.1:
+            #     for group in optim.param_groups:
+            #         group["lr"] *= 2.0
             # else:
             #     for group in optim.param_groups:
             #         group["lr"] *= 0.99
-
 
         optim.step()
         optim.zero_grad()
@@ -243,15 +246,6 @@ for i in range(10):
 
             print(split_len, torch.sum(~keep_mask).item())
 
-            means = f.tanh(raw_means) * scale
-            scaling = torch.exp(raw_scaling)
-            covariances = gaussians.build_covariances(scaling, transform)
-            conics = torch.inverse(covariances)
-
-            gaussians.plot_gaussians(means, covariances, values[:,1].unsqueeze(-1), scale)
-            plt.savefig("results_no_mlp/initialize_gaussians_{}_{}.png".format(i, j), dpi=200)
-            plt.close("all")
-
             mean_grad = torch.zeros_like(raw_means, device="cuda")
             mean_grad_norm = torch.zeros(raw_means.shape[0], device="cuda")
             scale_grad = torch.zeros_like(raw_means, device="cuda")
@@ -274,7 +268,7 @@ for i in range(10):
     plt.yscale("log")
     plt.savefig("results_no_mlp/max_scale_grad_{}.png".format(i))
 
-    means = f.tanh(raw_means) * scale
+    means = torch.tanh(raw_means) * scale
     scaling = torch.exp(raw_scaling)
     covariances = gaussians.build_covariances(scaling, transform)
     conics = torch.inverse(covariances)

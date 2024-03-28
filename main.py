@@ -4,7 +4,6 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as f
 
 from torch import nn
 
@@ -15,39 +14,53 @@ from model import *
 
 from diff_gaussian_sampling import GaussianSampler
 
-dt = 1.0
-dx = 0.05
+dx = 0.01
 
-train_timesteps = 5
+train_timesteps = 10
 cutoff_timesteps = 1
-test_timesteps = 10
+test_timesteps = 15
 
 scale = 2.5
 
-nx = ny = 5
+nx = ny = 25
 d = 2
 
-kernel_size = 5
+kernel_size = 10
 
 torch.manual_seed(0)
 
 model = Model(
-    Problem.WAVE,
-    nx, ny, d, dx, dt, kernel_size,
+    Problem.BURGERS,
+    nx, ny, d, dx, kernel_size,
     IntegrationRule.TRAPEZOID,
     scale
 )
 
+# fig = model.plot_gaussians()
+# plt.show()
+# plt.close(fig)
+# 
+# img1, img2, img3, img4 = model.generate_images(256)
+# 
+# plt.figure()
+# plt.imshow(img2)
+# plt.colorbar()
+# plt.show()
+# 
+# exit()
+
 training_loss = []
 
-optim = torch.optim.Adam(model.parameters())
+optim1 = torch.optim.AdamW(model.parameters_solve())
+optim2 = torch.optim.AdamW(model.parameters_optim())
 
 start = 0
 
 if len(sys.argv) > 1:
     state = torch.load(sys.argv[1])
     model.load_state_dict(state["model"])
-    optim.load_state_dict(state["optimizer"])
+    optim1.load_state_dict(state["optimizer_solve"])
+    optim2.load_state_dict(state["optimizer_optim"])
     start = state["epoch"]
     training_loss = state["training_loss"]
 
@@ -64,12 +77,17 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
     save_step = 100
     bootstrap_rate = 50
     epsilon = 1
+    switch_start = 1000
+    switch_step = 200
 
     current_timesteps = 1
+    epoch = start
 
     for epoch in range(start, N):
         time_samples = torch.rand(n_samples, device="cuda")
         samples = (torch.rand((n_samples, d), device="cuda") * 2.0 - 1.0) * scale
+
+        dt = 1.0
 
         boundaries = torch.cat((
             -torch.ones(n_samples//4, device="cuda") - torch.rand(n_samples//4, device="cuda") * 0.5,
@@ -100,8 +118,6 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
             bc_samples[n_samples:,:] = \
                 (hypersphere * 0.1 - torch.tensor([[0.65, 0.0]], device="cuda")) * scale
 
-        loss = torch.zeros(1, device="cuda")
-
         total_loss = 0
         total_pde_loss = 0
         total_bc_loss = 0
@@ -116,14 +132,12 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
         all_sufficient = True
 
         for i in range(min(min(epoch // bootstrap_rate + 1, current_timesteps), train_timesteps)):
-            t = dt * i
-
             pde_loss = torch.zeros(1, device="cuda")
             bc_loss = torch.zeros(1, device="cuda")
             conservation_loss = torch.zeros(1, device="cuda")
 
-            model.forward()
-            losses = model.compute_loss(t, samples, time_samples, bc_samples)
+            model.forward(dt)
+            losses = model.compute_loss(dt, samples, time_samples, bc_samples)
 
             if not torch.isnan(losses[0]) and not torch.isinf(losses[0]):
                 pde_loss += losses[0]
@@ -133,7 +147,59 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
                 conservation_loss += losses[2]
 
             current_loss = pde_loss + bc_loss + conservation_loss
-            loss += loss_weight * current_loss
+            loss = loss_weight * current_loss
+
+            # if (i+1) % cutoff_timesteps == 0:
+            if epoch < switch_start or (epoch % (switch_step * 2)) // switch_step == 1:
+            # if True:
+                loss.backward()
+                optim1.step()
+                optim1.zero_grad()
+
+            if i == 0 and epoch >= switch_start:
+                fig = model.plot_gaussians()
+                plt.savefig("results/gaussians_0.png")
+                plt.close(fig)
+
+                _, img, _, _ = model.generate_images(64)
+                fig = plt.figure()
+                plt.imshow(img)
+                plt.savefig("results/optim_0.png")
+                plt.close(fig)
+
+                for k in range(3):
+                    pde_loss = torch.zeros(1, device="cuda")
+                    bc_loss = torch.zeros(1, device="cuda")
+                    conservation_loss = torch.zeros(1, device="cuda")
+
+                    model.detach()
+                    model.optimize(dt, np.mean(training_loss[-5:]))
+                    losses = model.compute_loss(dt, samples, time_samples, bc_samples)
+
+                    fig = model.plot_gaussians()
+                    plt.savefig("results/gaussians_{}.png".format(k+1))
+                    plt.close(fig)
+
+                    _, img, _, _ = model.generate_images(64)
+                    fig = plt.figure()
+                    plt.imshow(img)
+                    plt.savefig("results/optim_{}.png".format(k+1))
+                    plt.close(fig)
+
+                    if not torch.isnan(losses[0]) and not torch.isinf(losses[0]):
+                        pde_loss += losses[0]
+                    if not torch.isnan(losses[1]) and not torch.isinf(losses[1]):
+                        bc_loss += losses[1]
+                    if not torch.isnan(losses[2]) and not torch.isinf(losses[2]):
+                        conservation_loss += losses[2]
+
+                    current_loss = pde_loss + bc_loss + conservation_loss
+                    
+                    if (epoch % (switch_step * 2)) // switch_step == 0:
+                        current_loss.backward()
+                        optim2.step()
+                        optim2.zero_grad()
+
             print(i, current_loss.item(), loss_weight)
             loss_weight *= np.exp(-epsilon * current_loss.item())
 
@@ -144,14 +210,6 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
 
             all_sufficient &= current_loss < 1.0
 
-            # if (i+1) % cutoff_timesteps == 0:
-            loss.backward()
-            optim.step()
-            optim.zero_grad()
-
-            loss = torch.zeros(1, device="cuda")
-
-            model.optimize()
             model.detach()
             model.clear()
             model.sample(samples, bc_samples)
@@ -159,10 +217,10 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
         if all_sufficient:
             current_timesteps = min(epoch // bootstrap_rate + 1, current_timesteps) + 1
 
-        if loss > 0:
-            loss.backward()
-            optim.step()
-            optim.zero_grad()
+        # if loss > 0:
+        #     loss.backward()
+        #     optim1.step()
+        #     optim1.zero_grad()
 
         if (epoch+1) % log_step == 0:
             training_loss.append(total_loss / (i+1) * train_timesteps)
@@ -175,7 +233,8 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
             torch.save({
                 "epoch": epoch + 2,
                 "model": model.state_dict(),
-                "optimizer": optim.state_dict(),
+                "optimizer_solve": optim1.state_dict(),
+                "optimizer_optim": optim2.state_dict(),
                 "training_loss": training_loss,
             }, "checkpoints/{}_model_{}.pt".format(model.problem.name.lower(), epoch))
 
@@ -188,9 +247,17 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
     torch.save({
         "epoch": epoch + 1,
         "model": model.state_dict(),
-        "optimizer": optim.state_dict(),
+        "optimizer_solve": optim1.state_dict(),
+        "optimizer_optim": optim2.state_dict(),
         "training_loss": training_loss,
     }, "{}_model.pt".format(model.problem.name.lower()))
+
+
+fig = plt.figure()
+plt.plot(np.linspace(0, len(training_loss)*log_step, len(training_loss)), training_loss)
+plt.yscale("log")
+plt.savefig("training_loss.png")
+plt.close(fig)
 
 res = 128
 os.makedirs("results", exist_ok=True)
@@ -215,8 +282,6 @@ if True:
     sampler = GaussianSampler(False)
 
     for i in range(test_timesteps + 1):
-        t = i * dt
-
         fig = model.plot_gaussians()
         plt.savefig("results/gaussians_plot{}.png".format(i))
         plt.close(fig)
@@ -240,8 +305,8 @@ if True:
         uxxs.append(uxx.reshape(res, res, d, d, -1).detach().cpu().numpy())
 
         if i < test_timesteps:
-            model.forward()
-            model.optimize()
+            model.forward(1.0)
+            # model.optimize(1.0, np.mean(training_loss[-5:]))
 
     for i in range(train_timesteps + 1):
         if model.problem == Problem.WAVE:

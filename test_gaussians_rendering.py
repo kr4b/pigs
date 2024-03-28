@@ -1,6 +1,5 @@
 import matplotlib.pyplot as plt
 import torch
-import torch.nn.functional as f
 
 from torch import nn
 
@@ -27,7 +26,7 @@ values = torch.exp(powers).repeat(1, 1, d, 1)
 values = values / torch.max(values)
 
 scaling = torch.exp(scaling)
-transform = f.tanh(transform) * 2.0 - 1.0
+transform = torch.tanh(transform) * 2.0 - 1.0
 
 covariances = gaussians.build_covariances(scaling, transform)
 

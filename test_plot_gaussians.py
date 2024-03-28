@@ -1,7 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as f
 
 from torch import nn
 
@@ -18,7 +17,7 @@ means = torch.stack((gx,gy), dim=-1).reshape(nx*ny, d)
 scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
 scaling = torch.exp(scaling)
 transform = torch.zeros((nx*ny,d * (d - 1) // 2), device="cuda")
-transform = f.tanh(transform)
+transform = torch.tanh(transform)
 opacities = torch.ones((nx*ny), device="cuda") * 0.25
 
 covariances = gaussians.build_covariances(scaling, transform)
@@ -78,7 +77,7 @@ img4 = gaussians.sample_gaussians_img(
     random_means, random_conics, opacities, random_values, res, res, 1.0).detach().cpu().numpy()
 
 transform = (torch.rand((nx*ny,d * (d - 1) // 2), device="cuda") * 2.0 - 1.0)
-transform = f.tanh(transform)
+transform = torch.tanh(transform)
 
 random_covariances = gaussians.build_covariances(scaling, transform)
 random_conics = torch.inverse(random_covariances)
