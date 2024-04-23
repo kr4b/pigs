@@ -14,7 +14,7 @@ from model import *
 
 from diff_gaussian_sampling import GaussianSampler
 
-dx = 0.01
+dx = 0.1
 
 train_timesteps = 10
 cutoff_timesteps = 1
@@ -25,7 +25,7 @@ scale = 2.5
 nx = ny = 25
 d = 2
 
-kernel_size = 10
+kernel_size = 5
 
 torch.manual_seed(0)
 
@@ -51,8 +51,9 @@ model = Model(
 
 training_loss = []
 
-optim1 = torch.optim.AdamW(model.parameters_solve())
-optim2 = torch.optim.AdamW(model.parameters_optim())
+optim1 = torch.optim.Adam(model.parameters_solve())
+optim2 = torch.optim.Adam(model.parameters_optim())
+scheduler = torch.optim.lr_scheduler.ExponentialLR(optim1, 0.9955)
 
 start = 0
 
@@ -72,22 +73,22 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
     torch.autograd.set_detect_anomaly(True)
 
     n_samples = 1024
-    N = 5000
+    N = 1000
     log_step = 10
     save_step = 100
     bootstrap_rate = 50
     epsilon = 1
-    switch_start = 1000
+    switch_start = 5000
     switch_step = 200
 
-    current_timesteps = 1
+    current_timesteps = 10
     epoch = start
 
     for epoch in range(start, N):
         time_samples = torch.rand(n_samples, device="cuda")
         samples = (torch.rand((n_samples, d), device="cuda") * 2.0 - 1.0) * scale
 
-        dt = 1.0
+        dt = 0.1
 
         boundaries = torch.cat((
             -torch.ones(n_samples//4, device="cuda") - torch.rand(n_samples//4, device="cuda") * 0.5,
@@ -221,6 +222,7 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
         #     loss.backward()
         #     optim1.step()
         #     optim1.zero_grad()
+        # scheduler.step()
 
         if (epoch+1) % log_step == 0:
             training_loss.append(total_loss / (i+1) * train_timesteps)

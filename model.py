@@ -37,7 +37,7 @@ class Network(nn.Module):
         # self.dx = nn.Parameter(torch.ones(1, device="cuda") * 0.1)
 
         self.samples_conv = nn.Sequential(
-            nn.Conv2d(in_channels, 50, kernel_size),
+            nn.Conv2d(in_channels + c * d + c * d * d, 50, kernel_size),
             # nn.LayerNorm((64, 1, 1)),
             activation,
             nn.Flatten(),
@@ -50,8 +50,6 @@ class Network(nn.Module):
         self.linear = nn.Sequential(
             nn.Linear(80, 80),
             # nn.LayerNorm(256),
-            activation,
-            nn.Linear(80, 80),
             activation,
             # nn.Linear(256, 256),
             # nn.LayerNorm(256),
@@ -99,7 +97,7 @@ class Model(nn.Module):
         gx, gy = torch.meshgrid((tx,ty), indexing="ij")
         self.initial_means = torch.stack((gx,gy), dim=-1)
         self.initial_means = self.initial_means.reshape(-1, d)
-        scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
+        scaling = torch.ones((nx*ny,d), device="cuda") * -4.5
         # scaling[10*ny+20] = -3.5
         # scaling[8*ny+20] = -3.5
         # scaling[20*ny+20] = -3.5
@@ -140,7 +138,7 @@ class Model(nn.Module):
             samples = self.initial_means.unsqueeze(-1) - sample_mean
             conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1 * self.scale)
             powers = -0.5 * (samples.transpose(-1, -2) @ (conics @ samples))
-            self.initial_u = torch.exp(powers).squeeze(-1) / 5.0
+            self.initial_u = torch.exp(powers).squeeze(-1) / 3.5
 
         keep_mask = torch.norm(self.initial_u, dim=-1) > 0.001
         self.initial_means = self.initial_means[keep_mask]
@@ -321,7 +319,9 @@ class Model(nn.Module):
             ux = self.sampler.sample_gaussians_derivative() # n*k*k, d, c
             uxx = self.sampler.sample_gaussians_laplacian() # n*k*k, d, d, c
             pde = dt * self.pde_rhs(samples, u, ux, uxx).reshape(u.shape[0], -1) # n*k*k, -1
-            in_samples = torch.cat((u, pde, bc_mask), -1)
+            in_samples = torch.cat((
+                u, ux.reshape(u.shape[0], -1), uxx.reshape(u.shape[0], -1), pde, bc_mask
+            ), -1)
 
         in_samples = in_samples.reshape(
             self.means.shape[0], self.kernel_size * self.kernel_size, -1
@@ -339,11 +339,11 @@ class Model(nn.Module):
             delta_v = self.solution_model_v(in_samples, in_params).reshape(self.means.shape[0], 2)
             delta_p = self.solution_model_p(in_samples, in_params).reshape(self.means.shape[0], 1)
 
-            deltas = torch.cat((delta_v, delta_p), dim=-1)
+            self.deltas = torch.cat((delta_v, delta_p), dim=-1)
         else:
-            deltas = self.solution_model(in_samples, in_params).reshape(self.means.shape[0], self.channels)
+            self.deltas = self.solution_model(in_samples, in_params).reshape(self.means.shape[0], self.channels)
 
-        u = self.u + deltas
+        u = self.u + self.deltas
 
         self.translation = \
             self.translation_model(in_samples, in_params).reshape(self.means.shape[0], -1)
@@ -500,12 +500,12 @@ class Model(nn.Module):
             delta_p = self.optimization_model_p(
                 in_samples, in_params).reshape(self.means.shape[0], 1)
 
-            deltas = torch.cat((delta_v, delta_p), dim=-1)
+            self.deltas = torch.cat((delta_v, delta_p), dim=-1)
         else:
-            deltas = self.optimization_model(
+            self.deltas = self.optimization_model(
                 in_samples, in_params).reshape(self.means.shape[0], self.channels)
 
-        self.u = self.u + deltas
+        self.u = self.u + self.deltas
 
         self.translation = self.translation_optimization_model(
             in_samples, in_params).reshape(self.means.shape[0], -1)
@@ -597,10 +597,11 @@ class Model(nn.Module):
             pde_loss += torch.mean(bc_mask * (ut[...,:2] - rhs) ** 2)
 
         bc_loss += torch.mean(bc_u_sample ** 2)
+        # conservation_loss += torch.mean(self.deltas ** 2)
         conservation_loss += torch.mean(self.translation ** 2)
         conservation_loss += torch.mean(self.dtransform ** 2)
         conservation_loss += torch.mean(self.dscale ** 2)
-        conservation_loss += torch.mean(self.scaling ** 2)
+        # conservation_loss += torch.mean(self.scaling ** 2)
 
         return self.pde_weight * pde_loss,\
                self.bc_weight * bc_loss,\
