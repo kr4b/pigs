@@ -70,24 +70,27 @@ class TransformNet(nn.Module):
              + self.layers(x).reshape(-1, self.d, self.d) # 1, d, d
 
 class InputTransform(nn.Module):
-    def __init__(self, c, d, activation):
+    def __init__(self, c, d, pde_size, activation):
         super(InputTransform, self).__init__()
         self.c = c
         self.d = d
+        self.pde_size = pde_size
 
         self.latent_net = LatentTransform(d + d * d + 2*c + 2*d*c, activation)
         self.transform_net = TransformNet(d, activation)
         self.transform_u_net = TransformNet(c, activation)
         self.transform_ux_net = TransformNet(d*c, activation)
         self.transform_uxx_net = TransformNet(d*c, activation)
+        self.transform_pde_net = TransformNet(pde_size, activation)
 
-    def forward(self, means, covariances, u, sample_u, sample_ux, sample_uxx):
+    def forward(self, means, covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
         means = means.unsqueeze(0) # 1, n, d
         covariances = covariances.reshape(1, -1, self.d*self.d) # 1, n, d*d
         u = u.unsqueeze(0) # 1, n, c
         sample_u = sample_u.unsqueeze(0) # 1, n, c
         ux = sample_ux.unsqueeze(0) # 1, n, d*c
         uxx = sample_uxx.unsqueeze(0) # 1, n, d*c
+        pde = sample_pde.unsqueeze(0) # 1, n, pde_size
         params = torch.cat((means, covariances, u, sample_u, ux, uxx), dim=-1).transpose(1, 2)
 
         latent = self.latent_net(params).mean(-1) # 1, LATENT_SIZE
@@ -96,6 +99,7 @@ class InputTransform(nn.Module):
         self.transform_u = self.transform_u_net(latent) # 1, c, c
         self.transform_ux = self.transform_ux_net(latent) # 1, d*c, d*c
         self.transform_uxx = self.transform_uxx_net(latent) # 1, d*c, d*c
+        self.transform_pde = self.transform_pde_net(latent) # 1, pde_size, pde_size
 
         covariances = covariances.reshape(-1, self.d, self.d)
         means = means.reshape(-1, self.d, 1)
@@ -103,12 +107,14 @@ class InputTransform(nn.Module):
         sample_u = sample_u.reshape(-1, self.c, 1)
         ux = ux.reshape(-1, self.d*self.c, 1)
         uxx = uxx.reshape(-1, self.d*self.c, 1)
+        pde = pde.reshape(-1, self.pde_size, 1)
         return self.transform @ means, \
                self.transform @ covariances, \
                self.transform_u @ u, \
                self.transform_u @ sample_u, \
                self.transform_ux @ ux, \
-               self.transform_uxx @ uxx
+               self.transform_uxx @ uxx, \
+               self.transform_pde @ pde \
 
     def transform_gaussians(self, means, covariances, u):
         covariances = covariances.reshape(-1, self.d, self.d)
@@ -148,15 +154,16 @@ def delta_network(m, c, d, activation):
     )
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, c, d, activation):
+    def __init__(self, c, d, pde_size, activation):
         super(DynamicsNetwork, self).__init__()
         self.c = c
         self.d = d
         self.transform_size = d * (d-1) // 2
+        self.pde_size = pde_size
 
-        self.input_transform = InputTransform(c, d, activation)
+        self.input_transform = InputTransform(c, d, pde_size, activation)
         self.input_projection = nn.Sequential(
-            nn.Linear(d * d + 2*c + 2*d*c, L1_SIZE),
+            nn.Linear(d * d + 2*c + 2*d*c + pde_size, L1_SIZE),
             # nn.BatchNorm1d(L1_SIZE),
             activation,
             nn.Linear(L1_SIZE, L2_SIZE),
@@ -176,11 +183,11 @@ class DynamicsNetwork(nn.Module):
         )
         self.delta_net = delta_network(1, c, d, activation)
 
-    def forward(self, means, covariances, u, sample_u, sample_ux, sample_uxx):
+    def forward(self, means, covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
         n, _ = means.shape
 
-        t_means, t_covariances, t_u, t_sample_u, t_ux, t_uxx = \
-            self.input_transform(means, covariances, u, sample_u, sample_ux, sample_uxx)
+        t_means, t_covariances, t_u, t_sample_u, t_ux, t_uxx, t_pde = \
+            self.input_transform(means, covariances, u, sample_u, sample_ux, sample_uxx, sample_pde)
 
         t_means = t_means.reshape(1, -1, self.d)
         t_covariances = t_covariances.reshape(1, -1, self.d*self.d)
@@ -188,7 +195,8 @@ class DynamicsNetwork(nn.Module):
         t_sample_u = t_sample_u.reshape(1, -1, self.c)
         t_ux = t_ux.reshape(1, -1, self.d*self.c)
         t_uxx = t_uxx.reshape(1, -1, self.d*self.c)
-        t_params = torch.cat((t_covariances, t_u, t_sample_u, t_ux, t_uxx), dim=-1)
+        t_pde = t_pde.reshape(1, -1, self.pde_size)
+        t_params = torch.cat((t_covariances, t_u, t_sample_u, t_ux, t_uxx, t_pde), dim=-1)
 
         self.global_features = self.input_projection(t_params).transpose(1, 2) # 1, n, LATENT_SIZE
 
@@ -311,7 +319,7 @@ class Model(nn.Module):
                     self.initial_u[(ny//2+i) * nx + nx//2+j] = 0.2
 
         self.sampler = GaussianSampler(False)
-        self.dynamics_network = DynamicsNetwork(self.channels, d, nn.Tanh()).cuda()
+        self.dynamics_network = DynamicsNetwork(self.channels, d, self.channels, nn.Tanh()).cuda()
         # self.split_network = SplitNetwork(self.channels, d, self.split_size, nn.Tanh()).cuda()
 
         self.reset()
@@ -409,7 +417,7 @@ class Model(nn.Module):
             sample_uxx = torch.stack((sample_uxx[:,0,0], sample_uxx[:,1,1]), dim=-2).reshape(n, -1)
 
         self.dynamics_network(
-            self.means, self.covariances, self.u, sample_u, sample_ux, sample_uxx)
+            self.means, self.covariances, self.u, sample_u, sample_ux, sample_uxx, sample_pde)
 
         # TODO: Split
 
