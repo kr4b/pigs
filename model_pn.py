@@ -22,6 +22,24 @@ class IntegrationRule(enum.Enum):
     FORWARD = enum.auto()
     BACKWARD = enum.auto()
 
+class WaveAct(nn.Module):
+    def __init__(self):
+        super(WaveAct, self).__init__() 
+        self.w1 = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.w2 = nn.Parameter(torch.ones(1), requires_grad=True)
+
+    def forward(self, x):
+        return self.w1 * torch.sin(x) + self.w2 * torch.cos(x)
+
+class RBFAct(nn.Module):
+    def __init__(self, in_dim):
+        super(RBFAct, self).__init__() 
+        self.b = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.c = nn.Parameter(torch.zeros(in_dim), requires_grad=True)
+
+    def forward(self, x):
+        return torch.exp(-self.b * (x - self.c) ** 2)
+
 # LATENT_SIZE = 512
 # L1_SIZE = 64
 # L2_SIZE = 128
@@ -38,14 +56,14 @@ class LatentTransform(nn.Module):
 
         self.layers = nn.Sequential(
             nn.Conv1d(in_channels, L1_SIZE, 1),
-            # nn.BatchNorm1d(L1_SIZE),
-            activation,
+            # nn.GroupNorm(1, L1_SIZE),
+            activation((L1_SIZE, 1)),
             nn.Conv1d(L1_SIZE, L2_SIZE, 1),
-            # nn.BatchNorm1d(L2_SIZE),
-            activation,
+            # nn.GroupNorm(1, L2_SIZE),
+            activation((L2_SIZE, 1)),
             nn.Conv1d(L2_SIZE, LATENT_SIZE, 1),
-            # nn.BatchNorm1d(LATENT_SIZE),
-            activation,
+            # nn.GroupNorm(1, LATENT_SIZE),
+            activation((LATENT_SIZE, 1)),
         )
 
     def forward(self, x):
@@ -57,11 +75,11 @@ class TransformNet(nn.Module):
         self.d = d
         self.layers = nn.Sequential(
             nn.Linear(LATENT_SIZE, L3_SIZE),
-            # nn.BatchNorm1d(L2_SIZE),
-            activation,
+            # nn.LayerNorm(L3_SIZE),
+            activation(L3_SIZE),
             nn.Linear(L3_SIZE, L2_SIZE),
-            # nn.BatchNorm1d(L2_SIZE),
-            activation,
+            # nn.LayerNorm(L2_SIZE),
+            activation(L2_SIZE),
             nn.Linear(L2_SIZE, d*d),
         )
 
@@ -142,14 +160,14 @@ def delta_network(m, c, d, activation):
     transform_size = d * (d-1) // 2
     return nn.Sequential(
         nn.Linear(2 * LATENT_SIZE, LATENT_SIZE),
-        # nn.BatchNorm1d(LATENT_SIZE),
-        activation,
+        # nn.LayerNorm(LATENT_SIZE),
+        activation(LATENT_SIZE),
         # nn.Linear(L3_SIZE, L2_SIZE),
-        # nn.BatchNorm1d(L2_SIZE),
-        # activation,
+        # nn.LayerNorm(L2_SIZE),
+        # activation(L2_SIZE),
         nn.Linear(LATENT_SIZE, L2_SIZE),
-        # nn.BatchNorm1d(L2_SIZE),
-        activation,
+        # nn.LayerNorm(L2_SIZE),
+        activation(L2_SIZE),
         nn.Linear(L2_SIZE, m * (d + d + transform_size + c)),
     )
 
@@ -164,22 +182,21 @@ class DynamicsNetwork(nn.Module):
         self.input_transform = InputTransform(c, d, pde_size, activation)
         self.input_projection = nn.Sequential(
             nn.Linear(d * d + 2*c + 2*d*c + pde_size, L1_SIZE),
-            # nn.BatchNorm1d(L1_SIZE),
-            activation,
+            # nn.LayerNorm(L1_SIZE),
+            activation(L1_SIZE),
             nn.Linear(L1_SIZE, L2_SIZE),
-            # nn.BatchNorm2d(L2_SIZE),
-            activation,
+            # nn.LayerNorm(L2_SIZE),
+            activation(L2_SIZE),
             nn.Linear(L2_SIZE, LATENT_SIZE),
         )
         self.distance_transform = nn.Sequential(
             nn.Linear(LATENT_SIZE, LATENT_SIZE),
-            # nn.BatchNorm1d(((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE)//2),
-            activation,
+            # nn.LayerNorm(LATENT_SIZE),
+            activation(LATENT_SIZE),
             nn.Linear(LATENT_SIZE, (DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
-            # nn.BatchNorm1d((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
-            # activation,
+            # nn.LayerNorm((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
+            # activation((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
             # nn.Linear(d*LATENT_SIZE, d*LATENT_SIZE),
-            # nn.BatchNorm1d(d*LATENT_SIZE),
         )
         self.delta_net = delta_network(1, c, d, activation)
 
@@ -281,10 +298,14 @@ class Model(nn.Module):
         self.pde_weight = 1.0
         self.bc_weight = 1.0
         self.conservation_weight = 0.1
+        self.initial_weight = 2.0
 
         self.split_size = 4
 
-        self.nu = 1.0 / (100.0 * np.pi)
+        if problem == Problem.BURGERS:
+            self.nu = 1.0 / (100.0 * np.pi)
+        elif problem == Problem.NAVIER_STOKES:
+            self.nu = 1e-3
 
         tx = torch.linspace(-1, 1, nx).cuda() * scale
         ty = torch.linspace(-1, 1, ny).cuda() * scale
@@ -292,15 +313,11 @@ class Model(nn.Module):
         self.initial_means = torch.stack((gx,gy), dim=-1)
         self.initial_means = self.initial_means.reshape(-1, d)
 
-        scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
+        scaling = torch.ones((nx*ny,d), device="cuda") * -5.5
         self.initial_scaling = torch.exp(scaling) * scale
 
         self.transform_size = d * (d - 1) // 2
-        self.initial_transform = torch.zeros((nx*ny,self.transform_size), device="cuda")
-
-        self.initial_covariances = \
-            gaussians.build_covariances(self.initial_scaling, self.initial_transform)
-        self.initial_conics = torch.inverse(self.initial_covariances)
+        self.initial_transforms = torch.zeros((nx*ny,self.transform_size), device="cuda")
 
         if problem == Problem.BURGERS or problem == Problem.DIFFUSION:
             self.channels = 1
@@ -313,24 +330,47 @@ class Model(nn.Module):
 
         elif problem == Problem.WAVE:
             self.channels = 2
-            self.initial_u = torch.zeros((nx*ny, 2), device="cuda")
+            self.initial_u = torch.zeros((nx*ny, self.channels), device="cuda")
             for i in range(-2, 3):
                 for j in range(-2, 3):
                     self.initial_u[(ny//2+i) * nx + nx//2+j] = 0.2
 
+        elif problem == Problem.NAVIER_STOKES:
+            self.channels = 1
+            self.initial_u = torch.zeros((nx*ny, self.channels), device="cuda")
+
         self.sampler = GaussianSampler(False)
-        self.dynamics_network = DynamicsNetwork(self.channels, d, self.channels, nn.Tanh()).cuda()
-        # self.split_network = SplitNetwork(self.channels, d, self.split_size, nn.Tanh()).cuda()
+
+        def activation(in_dim):
+            return nn.Tanh()
+            # return RBFAct(in_dim)
+
+        self.dynamics_network = DynamicsNetwork(self.channels, d, self.channels, activation).cuda()
+        # self.split_network = SplitNetwork(self.channels, d, self.split_size, activation).cuda()
+
+        self.set_initial_params(
+            self.initial_means, self.initial_u, self.initial_scaling, self.initial_transforms)
+
+    def set_initial_params(self, means, u, scaling, transforms):
+        self.true_initial_u = u.clone()
+        self.true_initial_means = means.clone()
+        self.true_initial_scaling = scaling.clone()
+        self.true_initial_transforms = transforms.clone()
+
+        self.initial_u = nn.Parameter(u)
+        self.initial_means = nn.Parameter(means)
+        self.initial_scaling = nn.Parameter(scaling)
+        self.initial_transforms = nn.Parameter(transforms)
 
         self.reset()
 
     def reset(self):
-        self.u = self.initial_u
-        self.means = self.initial_means
-        self.scaling = self.initial_scaling
-        self.transforms = self.initial_transform
-        self.covariances = self.initial_covariances
-        self.conics = self.initial_conics
+        self.u = self.initial_u + 0
+        self.means = self.initial_means + 0
+        self.scaling = self.initial_scaling + 0
+        self.transforms = self.initial_transforms + 0
+        self.covariances = gaussians.build_covariances(self.scaling, self.transforms)
+        self.conics = torch.inverse(self.covariances)
 
         self.clear()
 
@@ -391,14 +431,17 @@ class Model(nn.Module):
             ), dim=-1)
 
         elif self.problem == Problem.NAVIER_STOKES:
-            return self.mu * (uxx[:,0,0,:2] + uxx[:,1,1,:2]) \
-                 - (u[:,:2].reshape(-1, 1, 2) * ux[...,:2]).sum(-1) \
-                 - self.inv_rho * ux[...,-1]
+            return 0
+            # return self.mu * (uxx[:,0,0,:2] + uxx[:,1,1,:2]) \
+            #      - (u[:,:2].reshape(-1, 1, 2) * ux[...,:2]).sum(-1) \
+            #      - self.inv_rho * ux[...,-1]
+            # return self.nu * (uxx[:,0,0] + uxx[:,1,1]) \
+            #      - (u.reshape(-1, 1, 2) * ux).sum(-1)
 
         else:
             raise ValueError("Unexpected PDE problem:", self.problem)
 
-    def forward(self, dt):
+    def forward(self, t, dt):
         self.covariances = gaussians.build_covariances(self.scaling, self.transforms)
         self.conics = torch.inverse(self.covariances)
 
@@ -411,6 +454,7 @@ class Model(nn.Module):
             sample_ux = self.sampler.sample_gaussians_derivative() # n, d, c
             sample_uxx = self.sampler.sample_gaussians_laplacian() # n, d, d, c
             sample_pde = self.pde_rhs(self.means, sample_u, sample_ux, sample_uxx).reshape(n, -1)
+            # sample_pde = torch.zeros((n, self.channels), device="cuda")
 
             sample_u = sample_u.reshape(n, -1)
             sample_ux = sample_ux.reshape(n, -1)
@@ -438,6 +482,7 @@ class Model(nn.Module):
         ux = self.sampler.sample_gaussians_derivative() # n, d, c
         uxx = self.sampler.sample_gaussians_laplacian() # n, d, d, c
 
+        # TODO: Combine with regular samples (cat then split)
         self.sampler.preprocess(self.means, self.u, self.covariances, self.conics, bc_samples)
         bc_u_sample = self.sampler.sample_gaussians() # n, c
 
@@ -446,7 +491,7 @@ class Model(nn.Module):
         self.ux_samples.append(ux)
         self.uxx_samples.append(uxx)
 
-    def compute_loss(self, dt, samples, time_samples, bc_samples):
+    def compute_loss(self, t, dt, samples, time_samples, bc_samples):
         self.sample(samples, bc_samples)
 
         if self.rule == IntegrationRule.TRAPEZOID:
@@ -473,6 +518,7 @@ class Model(nn.Module):
         pde_loss = torch.zeros(1, device="cuda")
         bc_loss = torch.zeros(1, device="cuda")
         conservation_loss = torch.zeros(1, device="cuda")
+        initial_loss = torch.zeros(1, device="cuda")
 
         rhs = dt * self.pde_rhs(samples, u_sample, ux, uxx)
 
@@ -489,15 +535,18 @@ class Model(nn.Module):
             pde_loss += 0.01 * torch.mean((ut[...,0] - rhs[...,0]) ** 2)
             pde_loss += torch.mean((ut[...,1] - rhs[...,1]) ** 2)
 
-        elif self.problem == Problem.NAVIER_STOKES:
-            self.sampler.preprocess(
-                self.prev_means, self.translation, self.prev_covariances, self.prev_conics, samples)
-            translation_sample = self.sampler.sample_gaussians() # n, c
+        # elif self.problem == Problem.NAVIER_STOKES:
+            # self.sampler.preprocess(
+            #     self.prev_means, self.translation, self.prev_covariances, self.prev_conics, samples)
+            # translation_sample = self.sampler.sample_gaussians() # n, c
 
-            bc_mask = self.bc_mask(samples)
-            pde_loss += torch.mean(bc_mask * (translation_sample - self.u_samples[-2][...,:2]) ** 2)
-            pde_loss += torch.mean(bc_mask * (ux[:,0,0] + ux[:,1,1]) ** 2)
-            pde_loss += torch.mean(bc_mask * (ut[...,:2] - rhs) ** 2)
+            # bc_mask = self.bc_mask(samples)
+            # pde_loss += torch.mean(bc_mask * (translation_sample - self.u_samples[-2][...,:2]) ** 2)
+            # pde_loss += torch.mean(bc_mask * (ux[:,0,0] + ux[:,1,1]) ** 2)
+            # pde_loss += torch.mean(bc_mask * (ut[...,:2] - rhs) ** 2)
+
+            # pde_loss += torch.mean((ux[:,0,0] + ux[:,1,1]) ** 2)
+            # pde_loss += torch.mean((ut[...,:2] - rhs) ** 2)
 
         bc_loss += torch.mean(bc_u_sample ** 2)
         conservation_loss += torch.mean(self.du ** 2)
@@ -505,18 +554,22 @@ class Model(nn.Module):
         conservation_loss += torch.mean(self.dtransforms ** 2)
         conservation_loss += torch.mean(self.dscaling ** 2)
 
-        return self.pde_weight * pde_loss,\
-               self.bc_weight * bc_loss,\
-               self.conservation_weight * conservation_loss
+        if t == 0:
+            true_initial_covariances = gaussians.build_covariances(
+                self.true_initial_scaling, self.true_initial_transforms)
+            true_initial_conics = torch.inverse(true_initial_covariances)
+            self.sampler.preprocess(self.true_initial_means, self.true_initial_u,
+                                    true_initial_covariances, true_initial_conics, samples)
+            initial_u_sample = self.sampler.sample_gaussians() # n, c
+            initial_loss += torch.mean((self.u_samples[-2] - initial_u_sample) ** 2)
+
+        return self.pde_weight * pde_loss, \
+               self.bc_weight * bc_loss, \
+               self.conservation_weight * conservation_loss, \
+               self.initial_weight * initial_loss
 
     def generate_images(self, res):
-        if self.problem == Problem.BURGERS or self.problem == Problem.DIFFUSION:
-            img1 = gaussians.sample_gaussians_img(
-                self.means, self.conics, self.u, res, res, self.scale
-            ).detach().cpu().numpy()
-
-            return img1
-        elif self.problem == Problem.WAVE:
+        if self.problem == Problem.WAVE:
             img1 = gaussians.sample_gaussians_img(
                 self.means, self.conics, self.u[...,0], res, res, self.scale
             ).detach().cpu().numpy()
@@ -526,6 +579,12 @@ class Model(nn.Module):
             ).detach().cpu().numpy()
 
             return np.stack([img1, img2])
+        else:
+            img1 = gaussians.sample_gaussians_img(
+                self.means, self.conics, self.u, res, res, self.scale
+            ).detach().cpu().numpy()
+
+            return img1
 
     def plot_gaussians(self):
         return gaussians.plot_gaussians(self.means, self.covariances, self.u, self.scale)

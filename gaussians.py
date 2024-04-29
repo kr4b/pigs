@@ -30,7 +30,7 @@ def plot_gaussians(means, covariances, values, scale=1.0):
         color = matplotlib.cm.get_cmap("viridis")
         v = (values[i,0] - vmin) / vmax
         ellipse = Ellipse(
-            xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(v), alpha=0.4)
+            xy=(0.0, 0.0), width=25.0, height=25.0, fc=color(v), alpha=0.25)
         affine = Affine2D(covariance[i]).translate(*means[i,:2])
         ellipse.set_transform(affine + ax.transData)
 
