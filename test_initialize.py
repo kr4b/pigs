@@ -1,8 +1,10 @@
 import sys
 
+import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import scipy.io
 
 import imageio.v3 as imageio
 
@@ -13,27 +15,37 @@ import gaussians
 from diff_gaussian_sampling import GaussianSampler
 
 res = 32
-nx = ny = 3
+nx = ny = 60
 d = 2
 
 tx = torch.linspace(-1, 1, nx).cuda()
 ty = torch.linspace(-1, 1, ny).cuda()
 gx, gy = torch.meshgrid((tx,ty), indexing="ij")
 raw_means = torch.stack((gx,gy), dim=-1).reshape(nx*ny,d)
-raw_scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
-transform = torch.zeros((nx*ny,d * (d - 1) // 2), device="cuda")
+raw_scaling = torch.ones((nx*ny,d), device="cuda") * -4.5
+transforms = torch.zeros((nx*ny,d * (d - 1) // 2), device="cuda")
 values = torch.ones((nx*ny,1), device="cuda")
 
 raw_means = nn.Parameter(raw_means)
 values = nn.Parameter(values)
 raw_scaling = nn.Parameter(raw_scaling)
-transform = nn.Parameter(transform)
+transforms = nn.Parameter(transforms)
 
 sample_mean = None
 
 if len(sys.argv) > 1:
     if sys.argv[1] == "gaussian":
         sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, d, 1)
+    elif sys.argv[1] == "f":
+        f_index = int(sys.argv[2])
+
+        with h5py.File("../training_data/ns_V1e-3_N5000_T50.mat", "r") as file:
+            f = np.transpose(file["u"][...,f_index], (1, 2, 0))
+
+        # f = scipy.io.loadmat("../training_data/ns_V1e-5_N1200_T20.mat")["u"][f_index]
+        desired = f[:,:,0]
+        desired = torch.from_numpy(desired).to(torch.float).cuda()
+        res = desired.shape[0]
     else:
         img = imageio.imread(sys.argv[1])
         desired = np.array(img)
@@ -60,22 +72,22 @@ optim = torch.optim.Adam([
     { "name": "means", "params": raw_means },
     { "name": "values", "params": values },
     { "name": "scaling", "params": raw_scaling },
-    { "name": "transform", "params": transform }
-])
+    { "name": "transforms", "params": transforms }
+], lr=5e-2)
 
 log_step = 100
-densification_step = log_step * 10 + 1
+densification_step = log_step * 10000 + 1
 
 losses = []
 max_mean_grad = []
 max_scale_grad = []
 
-for i in range(100000):
+for i in range(6000):
     samples = torch.rand((1024, 2), device="cuda") * 2.0 - 1.0
 
     means = torch.tanh(raw_means)
     scaling = torch.exp(raw_scaling)
-    covariances = gaussians.build_covariances(scaling, transform)
+    covariances = gaussians.build_covariances(scaling, transforms)
     conics = torch.inverse(covariances)
 
     sampler.preprocess(means, values, covariances, conics, samples)
@@ -117,7 +129,7 @@ for i in range(100000):
     if ((i+1) % densification_step) == 0:
         means = torch.tanh(raw_means)
         scaling = torch.exp(raw_scaling)
-        covariances = gaussians.build_covariances(scaling, transform)
+        covariances = gaussians.build_covariances(scaling, transforms)
         gaussians.plot_gaussians(means, covariances, values)
         plt.savefig("initialize_before.png", dpi=200)
 
@@ -143,7 +155,7 @@ for i in range(100000):
                 "means": raw_means.data[split_indices] + 2 * pc,
                 "values": values.data[split_indices],
                 "scaling": raw_scaling.data[split_indices],
-                "transform": transform.data[split_indices]
+                "transforms": transforms.data[split_indices]
             }
 
             new_tensors = {}
@@ -171,11 +183,11 @@ for i in range(100000):
             raw_means = new_tensors["means"]
             values = new_tensors["values"]
             raw_scaling = new_tensors["scaling"]
-            transform = new_tensors["transform"]
+            transforms = new_tensors["transforms"]
 
         means = torch.tanh(raw_means)
         scaling = torch.exp(raw_scaling)
-        covariances = gaussians.build_covariances(scaling, transform)
+        covariances = gaussians.build_covariances(scaling, transforms)
         gaussians.plot_gaussians(means, covariances, values)
         plt.savefig("initialize_after.png", dpi=200)
         exit()
@@ -184,8 +196,16 @@ for i in range(100000):
 
 means = torch.tanh(raw_means)
 scaling = torch.exp(raw_scaling)
-transform = torch.tanh(transform)
-covariances = gaussians.build_covariances(scaling, transform)
+
+if sys.argv[1] == "f":
+    torch.save({
+        "means": means,
+        "values": values,
+        "scaling": scaling,
+        "transforms": transforms,
+    }, "initialization/V1e-3/f_{}.pt".format(f_index))
+
+covariances = gaussians.build_covariances(scaling, transforms)
 conics = torch.inverse(covariances)
 
 gaussians.plot_gaussians(means, covariances, values)
@@ -196,15 +216,15 @@ plt.plot(np.arange(0, len(losses)*100, 100), losses)
 plt.yscale("log")
 plt.savefig("initialize_loss.png")
 
-plt.figure()
-plt.plot(np.arange(0, len(losses)*100, 100), max_mean_grad)
-plt.yscale("log")
-plt.savefig("max_mean_grad.png")
-
-plt.figure()
-plt.plot(np.arange(0, len(losses)*100, 100), max_scale_grad)
-plt.yscale("log")
-plt.savefig("max_scale_grad.png")
+# plt.figure()
+# plt.plot(np.arange(0, len(losses)*100, 100), max_mean_grad)
+# plt.yscale("log")
+# plt.savefig("max_mean_grad.png")
+# 
+# plt.figure()
+# plt.plot(np.arange(0, len(losses)*100, 100), max_scale_grad)
+# plt.yscale("log")
+# plt.savefig("max_scale_grad.png")
 
 res = 256
 
