@@ -101,9 +101,9 @@ class InputTransform(nn.Module):
         self.transform_uxx_net = TransformNet(d*c, activation)
         self.transform_pde_net = TransformNet(pde_size, activation)
 
-    def forward(self, means, covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
+    def forward(self, means, full_covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
         means = means.unsqueeze(0) # 1, n, d
-        covariances = covariances.reshape(1, -1, self.d*self.d) # 1, n, d*d
+        covariances = full_covariances.reshape(1, -1, self.d*self.d) # 1, n, d*d
         u = u.unsqueeze(0) # 1, n, c
         sample_u = sample_u.unsqueeze(0) # 1, n, c
         ux = sample_ux.unsqueeze(0) # 1, n, d*c
@@ -119,13 +119,14 @@ class InputTransform(nn.Module):
         self.transform_uxx = self.transform_uxx_net(latent) # 1, d*c, d*c
         self.transform_pde = self.transform_pde_net(latent) # 1, pde_size, pde_size
 
-        covariances = covariances.reshape(-1, self.d, self.d)
+        covariances = full_covariances.reshape(-1, self.d, self.d)
         means = means.reshape(-1, self.d, 1)
         u = u.reshape(-1, self.c, 1)
         sample_u = sample_u.reshape(-1, self.c, 1)
         ux = ux.reshape(-1, self.d*self.c, 1)
         uxx = uxx.reshape(-1, self.d*self.c, 1)
         pde = pde.reshape(-1, self.pde_size, 1)
+
         return self.transform @ means, \
                self.transform @ covariances, \
                self.transform_u @ u, \
@@ -200,11 +201,11 @@ class DynamicsNetwork(nn.Module):
         )
         self.delta_net = delta_network(1, c, d, activation)
 
-    def forward(self, means, covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
+    def forward(self, means, full_covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
         n, _ = means.shape
 
         t_means, t_covariances, t_u, t_sample_u, t_ux, t_uxx, t_pde = \
-            self.input_transform(means, covariances, u, sample_u, sample_ux, sample_uxx, sample_pde)
+            self.input_transform(means, full_covariances, u, sample_u, sample_ux, sample_uxx, sample_pde)
 
         t_means = t_means.reshape(1, -1, self.d)
         t_covariances = t_covariances.reshape(1, -1, self.d*self.d)
@@ -250,7 +251,7 @@ class DynamicsNetwork(nn.Module):
             self.input_transform.transform_gaussians(means, covariances, u)
 
         t_means = t_means.reshape(1, -1, self.d)
-        t_covariances = t_covariances.reshape(1, -1, self.d*self.d)
+        t_covariances = t_covariances.reshape(1, -1, self.d*(self.d+1)//2)
         t_u = t_u.reshape(1, -1, self.c)
         t_params = torch.cat((t_covariances, t_u), dim=-1)
 
@@ -313,7 +314,7 @@ class Model(nn.Module):
         self.initial_means = torch.stack((gx,gy), dim=-1)
         self.initial_means = self.initial_means.reshape(-1, d)
 
-        scaling = torch.ones((nx*ny,d), device="cuda") * -5.5
+        scaling = torch.ones((nx*ny,d), device="cuda") * -4.5
         self.initial_scaling = torch.exp(scaling) * scale
 
         self.transform_size = d * (d - 1) // 2
@@ -369,8 +370,9 @@ class Model(nn.Module):
         self.means = self.initial_means + 0
         self.scaling = self.initial_scaling + 0
         self.transforms = self.initial_transforms + 0
-        self.covariances = gaussians.build_covariances(self.scaling, self.transforms)
-        self.conics = torch.inverse(self.covariances)
+        covariances, conics = gaussians.build_covariances(self.scaling, self.transforms)
+        self.covariances = covariances
+        self.conics = conics
 
         self.clear()
 
@@ -393,15 +395,15 @@ class Model(nn.Module):
         global_feature = self.dynamics_network.global_feature
         dscaling, dtransforms, du = self.split_network(feature, global_feature)
 
-        eigvals, eigvecs = torch.linalg.eig(self.covariances[indices])
+        full_covariances, full_conics = gaussians.build_full_covariances(self.scaling, self.transforms)
+        eigvals, eigvecs = torch.linalg.eig(full_covariances[indices])
         eigvecs = eigvecs * eigvals
 
         split_means = self.means[indices].unsqueeze(0) + \
                       torch.tensor([-eigvecs[0], eigvecs[0], -eigvecs[1], eigvecs[1]], device="cuda")
         split_scaling = self.scaling[indices].unsqueeze(0) / 2.0 + dscaling
         split_transforms = self.scaling[indices].unsqueeze(0) + dtransforms
-        split_covariances = gaussians.build_covariances(split_scaling, split_transforms)
-        split_conics = torch.inverse(split_covariances)
+        split_covariances, split_conics = gaussians.build_covariances(split_scaling,split_transforms)
         split_u = du
 
         self.dynamics_network.transform_gaussians(split_means, split_covariances, split_u)
@@ -442,8 +444,10 @@ class Model(nn.Module):
             raise ValueError("Unexpected PDE problem:", self.problem)
 
     def forward(self, t, dt):
-        self.covariances = gaussians.build_covariances(self.scaling, self.transforms)
-        self.conics = torch.inverse(self.covariances)
+        full_covariances,full_conics = gaussians.build_full_covariances(self.scaling,self.transforms)
+        covariances, conics = gaussians.flatten_covariances(full_covariances, full_conics)
+        self.covariances = covariances
+        self.conics = conics
 
         n = self.means.shape[0]
 
@@ -461,7 +465,7 @@ class Model(nn.Module):
             sample_uxx = torch.stack((sample_uxx[:,0,0], sample_uxx[:,1,1]), dim=-2).reshape(n, -1)
 
         self.dynamics_network(
-            self.means, self.covariances, self.u, sample_u, sample_ux, sample_uxx, sample_pde)
+            self.means, full_covariances, self.u, sample_u, sample_ux, sample_uxx, sample_pde)
 
         # TODO: Split
 
@@ -555,9 +559,8 @@ class Model(nn.Module):
         conservation_loss += torch.mean(self.dscaling ** 2)
 
         if t == 0:
-            true_initial_covariances = gaussians.build_covariances(
+            true_initial_covariances, true_initial_conics = gaussians.build_covariances(
                 self.true_initial_scaling, self.true_initial_transforms)
-            true_initial_conics = torch.inverse(true_initial_covariances)
             self.sampler.preprocess(self.true_initial_means, self.true_initial_u,
                                     true_initial_covariances, true_initial_conics, samples)
             initial_u_sample = self.sampler.sample_gaussians() # n, c

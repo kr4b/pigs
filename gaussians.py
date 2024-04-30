@@ -17,7 +17,10 @@ def plot_gaussians(means, covariances, values, scale=1.0):
     values = values.detach().cpu().numpy()
     covariances = covariances.detach().cpu().numpy()
     covariance = np.zeros((covariances.shape[0], 3, 3))
-    covariance[:,:d,:d] = covariances
+    covariance[:,0,0] = covariances[:,0]
+    covariance[:,1,0] = covariances[:,1]
+    covariance[:,0,1] = covariances[:,1]
+    covariance[:,1,1] = covariances[:,2]
     covariance[:,2,2] = 1.0
 
     fig = plt.figure()
@@ -157,7 +160,7 @@ def gaussian_derivative2(means, conics, values, samples):
 # 
 #     return rendered_image.transpose(0, -1)
 
-def build_covariances(s, t):
+def build_full_covariances(s, t):
     t = torch.tanh(t)
     S = torch.diag_embed(s)
     T = torch.diag_embed(torch.zeros(s.shape, device="cuda"))
@@ -172,9 +175,20 @@ def build_covariances(s, t):
     T[..., indices[0], indices[1]] = t
     T = T + torch.diag_embed(torch.ones(s.shape, device="cuda"))
 
-    return T @ S @ torch.transpose(T, -1, -2)
+    covariances = T @ S @ torch.transpose(T, -1, -2)
+    conics = torch.inverse(covariances)
+
+    return covariances, conics
     # return T @ S
 
+def flatten_covariances(covariances, conics):
+    covariances = covariances.reshape(*covariances.shape[:-2], -1)[..., [0, 1, 3]]
+    conics = conics.reshape(*conics.shape[:-2], -1)[..., [0, 1, 3]]
+    return covariances, conics
+
+def build_covariances(s, t):
+    covariances, conics = build_full_covariances(s, t)
+    return flatten_covariances(covariances, conics)
 
 import unittest
 
