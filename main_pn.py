@@ -89,6 +89,38 @@ if model.problem == Problem.NAVIER_STOKES:
 
 print(sum(p.numel() for p in model.parameters()))
 
+training_loss = []
+mean_loss = []
+
+log_step = 100
+n_samples = 1024
+
+optim = torch.optim.Adam(model.parameters())
+scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.9955)
+
+dt = 1.0
+
+start = 0
+
+if len(sys.argv) > 1:
+    state = torch.load(sys.argv[1])
+    # prev_initial_u = model.initial_u.clone()
+    # prev_initial_means = model.initial_means.clone()
+    # prev_initial_scaling = model.initial_scaling.clone()
+    # prev_initial_transforms = model.initial_transforms.clone()
+    model.load_state_dict(state["model"])
+    # model.initial_u = nn.Parameter(prev_initial_u)
+    # model.initial_means = nn.Parameter(prev_initial_means)
+    # model.initial_scaling = nn.Parameter(prev_initial_scaling)
+    # model.initial_transforms = nn.Parameter(prev_initial_transforms)
+    # model.set_initial_params(
+    #     model.initial_means.detach().data, model.initial_u.detach().data, model.initial_scaling.detach().data, model.initial_transforms.detach().data)
+    optim.load_state_dict(state["optimizer"])
+    start = state["epoch"]
+    training_loss = state["training_loss"]
+
+# model.reset()
+# 
 # fig = model.plot_gaussians()
 # plt.show()
 # plt.close(fig)
@@ -108,28 +140,6 @@ print(sum(p.numel() for p in model.parameters()))
 # 
 # exit()
 
-training_loss = []
-mean_loss = []
-
-log_step = 100
-n_samples = 1024
-
-optim = torch.optim.Adam(model.parameters())
-scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.9955)
-
-dt = 1.0
-
-start = 0
-
-if len(sys.argv) > 1:
-    state = torch.load(sys.argv[1])
-    model.load_state_dict(state["model"])
-    # model.set_initial_params(
-    #     model.initial_means.detach().data, model.initial_u.detach().data, model.initial_scaling.detach().data, model.initial_transforms.detach().data)
-    optim.load_state_dict(state["optimizer"])
-    start = state["epoch"]
-    training_loss = state["training_loss"]
-
 if len(sys.argv) <= 1 or "--resume" in sys.argv:
     os.makedirs("checkpoints", exist_ok=True)
 
@@ -138,7 +148,7 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
     torch.autograd.set_detect_anomaly(True)
 
     n_samples = 1024
-    N = 5000
+    N = 10000
     log_step = 10
     save_step = 100
     bootstrap_rate = 50
@@ -312,7 +322,7 @@ with torch.no_grad():
         samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
 
         model.sampler.preprocess(model.means, model.u, model.covariances, model.conics, samples)
-        imgs.append(model.sampler.sample_gaussians().reshape(res, res).detach().cpu().numpy())
+        imgs.append(model.sampler.sample_gaussians().reshape(res, res, -1).detach().cpu().numpy())
 
         vmin = min(vmin, np.min(imgs[-1]))
         vmax = max(vmax, np.max(imgs[-1]))
@@ -325,14 +335,14 @@ with torch.no_grad():
 
         if model.problem == Problem.WAVE:
             ax = fig.subplots(1, 2)
-            im = ax[0].imshow(imgs[i][0], vmin=vmin, vmax=vmax)
+            im = ax[0].imshow(imgs[i][...,0], vmin=vmin, vmax=vmax)
             plt.colorbar(im)
-            im = ax[1].imshow(imgs[i][1], vmin=vmin, vmax=vmax)
+            im = ax[1].imshow(imgs[i][...,1], vmin=vmin, vmax=vmax)
             plt.colorbar(im)
 
         else:
             plt.imshow(imgs[i])#, cmap="plasma")
             plt.colorbar()
-            plt.savefig("results_model_pn/frame{}.png".format(i))
 
+        plt.savefig("results_model_pn/frame{}.png".format(i))
         plt.close(fig)

@@ -22,7 +22,7 @@ tx = torch.linspace(-1, 1, nx).cuda()
 ty = torch.linspace(-1, 1, ny).cuda()
 gx, gy = torch.meshgrid((tx,ty), indexing="ij")
 raw_means = torch.stack((gx,gy), dim=-1).reshape(nx*ny,d)
-raw_scaling = torch.ones((nx*ny,d), device="cuda") * -4.5
+raw_scaling = torch.ones((nx*ny,1), device="cuda") * -4.5
 transforms = torch.zeros((nx*ny,d * (d - 1) // 2), device="cuda")
 values = torch.ones((nx*ny,1), device="cuda")
 
@@ -76,19 +76,22 @@ optim = torch.optim.Adam([
 ], lr=5e-2)
 
 log_step = 100
-densification_step = log_step * 10000 + 1
+densification_step = log_step * 100000 + 1
 
 losses = []
 max_mean_grad = []
 max_scale_grad = []
 
 for i in range(6000):
-    samples = torch.rand((1024, 2), device="cuda") * 2.0 - 1.0
+    samples = torch.rand((1024, d), device="cuda") * 2.0 - 1.0
 
     means = torch.tanh(raw_means)
     scaling = torch.exp(raw_scaling)
-    covariances = gaussians.build_covariances(scaling, transforms)
-    conics = torch.inverse(covariances)
+    # full_covariances, full_conics = gaussians.build_full_covariances(scaling, transforms)
+    full_covariances = scaling.unsqueeze(-1) \
+                     * torch.eye(d, device="cuda").unsqueeze(0).repeat(nx*ny, 1, 1)
+    full_conics = torch.inverse(full_covariances)
+    covariances, conics = gaussians.flatten_covariances(full_covariances, full_conics)
 
     sampler.preprocess(means, values, covariances, conics, samples)
     img = sampler.sample_gaussians().reshape(1024)
@@ -116,6 +119,9 @@ for i in range(6000):
         scale_grad_norm = torch.norm(scale_grad, dim=-1)
         max_mean_grad.append(torch.amax(mean_grad_norm).item())
         max_scale_grad.append(torch.amax(scale_grad_norm).item())
+
+        # gaussians.plot_gaussians(means, covariances, values)
+        # plt.show()
 
         print("Iteration", i)
         print("   loss", loss.item())
@@ -197,16 +203,19 @@ for i in range(6000):
 means = torch.tanh(raw_means)
 scaling = torch.exp(raw_scaling)
 
-if sys.argv[1] == "f":
-    torch.save({
-        "means": means,
-        "values": values,
-        "scaling": scaling,
-        "transforms": transforms,
-    }, "initialization/V1e-3/f_{}.pt".format(f_index))
+# if sys.argv[1] == "f":
+#     torch.save({
+#         "means": means,
+#         "values": values,
+#         "scaling": scaling,
+#         "transforms": transforms,
+#     }, "initialization/V1e-3/f_{}.pt".format(f_index))
 
-covariances = gaussians.build_covariances(scaling, transforms)
-conics = torch.inverse(covariances)
+# full_covariances, full_conics = gaussians.build_full_covariances(scaling, transforms)
+full_covariances = scaling.unsqueeze(-1) \
+             * torch.eye(d, device="cuda").unsqueeze(0).repeat(nx*ny, 1, 1)
+full_conics = torch.inverse(full_covariances)
+covariances, conics = gaussians.flatten_covariances(full_covariances, full_conics)
 
 gaussians.plot_gaussians(means, covariances, values)
 plt.savefig("initialize_gaussians.png", dpi=200)

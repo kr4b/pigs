@@ -47,8 +47,8 @@ class RBFAct(nn.Module):
 LATENT_SIZE = 64
 L1_SIZE = 16
 L2_SIZE = 32
-L3_SIZE = 32
-DISTANCE_EMBEDDINGS = 23
+L3_SIZE = 48
+EMBEDDING_SIZE = 21
 
 class LatentTransform(nn.Module):
     def __init__(self, in_channels, activation):
@@ -174,10 +174,10 @@ def delta_network(m, c, d, activation):
         nn.Linear(2 * LATENT_SIZE, LATENT_SIZE),
         # nn.LayerNorm(LATENT_SIZE),
         activation(LATENT_SIZE),
-        # nn.Linear(L3_SIZE, L2_SIZE),
-        # nn.LayerNorm(L2_SIZE),
-        # activation(L2_SIZE),
-        nn.Linear(LATENT_SIZE, L2_SIZE),
+        nn.Linear(LATENT_SIZE, L3_SIZE),
+        # nn.LayerNorm(L3_SIZE),
+        activation(L3_SIZE),
+        nn.Linear(L3_SIZE, L2_SIZE),
         # nn.LayerNorm(L2_SIZE),
         activation(L2_SIZE),
         nn.Linear(L2_SIZE, m * (d + d + transform_size + c)),
@@ -202,20 +202,38 @@ class DynamicsNetwork(nn.Module):
             activation(L2_SIZE),
             nn.Linear(L2_SIZE, LATENT_SIZE),
         )
-        self.distance_transform = nn.Sequential(
+        self.distance_transform = nn.Parameter(
+            torch.rand((LATENT_SIZE, EMBEDDING_SIZE), device="cuda")
+        )
+        self.transform = nn.Sequential(
             nn.Linear(LATENT_SIZE, LATENT_SIZE),
-            # nn.LayerNorm(LATENT_SIZE),
             activation(LATENT_SIZE),
             nn.Linear(LATENT_SIZE, LATENT_SIZE),
-            # nn.LayerNorm(LATENT_SIZE),
             activation(LATENT_SIZE),
-            nn.Linear(LATENT_SIZE, DISTANCE_EMBEDDINGS*LATENT_SIZE),
-            # nn.LayerNorm((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
-            # activation((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
-            # nn.Linear(d*LATENT_SIZE, d*LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, LATENT_SIZE),
+            activation(LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, LATENT_SIZE),
+        )
+        self.query_transform = nn.Sequential(
+            nn.Linear(LATENT_SIZE, LATENT_SIZE),
+            activation(LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, LATENT_SIZE),
+            activation(LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, (LATENT_SIZE+L1_SIZE)//2),
+            activation((LATENT_SIZE+L1_SIZE)//2),
+            nn.Linear((LATENT_SIZE+L1_SIZE)//2, L1_SIZE),
+        )
+        self.key_transform = nn.Sequential(
+            nn.Linear(LATENT_SIZE, LATENT_SIZE),
+            activation(LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, LATENT_SIZE),
+            activation(LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, (LATENT_SIZE+L1_SIZE)//2),
+            activation((LATENT_SIZE+L1_SIZE)//2),
+            nn.Linear((LATENT_SIZE+L1_SIZE)//2, L1_SIZE),
         )
         self.frequencies = nn.Parameter(
-            torch.randn((DISTANCE_EMBEDDINGS-d-1) // d // 2, device="cuda") * 10,
+            torch.randn((EMBEDDING_SIZE-1) // d // 2, device="cuda") * 10,
             requires_grad=False
         )
         self.delta_net = delta_network(1, c, d, activation)
@@ -239,10 +257,12 @@ class DynamicsNetwork(nn.Module):
     def _compute_deltas(self, sampler, features, delta_net, size):
         b, n, l = features.shape
 
-        distance_transforms = \
-            self.distance_transform(features).reshape(b, n, l, -1) # 1, n, LATENT_SIZE, -1
-        _, neighbor_features1 = sampler.aggregate_neighbors(
-            features.squeeze(0), self.frequencies, distance_transforms.squeeze(0))
+        transforms = self.transform(features).reshape(b, n, l) # 1, n, LATENT_SIZE
+        queries = self.query_transform(features).reshape(b, n, -1) # 1, n, L1_SIZE
+        keys = self.key_transform(features).reshape(b, n, -1) # 1, n, L1_SIZE
+        indices, neighbor_features1 = sampler.aggregate_neighbors(
+            features.squeeze(0), transforms.squeeze(0), queries.squeeze(0),
+            keys.squeeze(0), self.frequencies, self.distance_transform)
         # if torch.isnan(neighbor_features1.mean()):
         #     for i in range(neighbor_features1.shape[0]):
         #         if torch.isnan(neighbor_features1[i].mean()):
@@ -320,7 +340,7 @@ class Model(nn.Module):
         self.initial_means = torch.stack((gx,gy), dim=-1)# * 0
         self.initial_means = self.initial_means.reshape(-1, d)
 
-        scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
+        scaling = torch.ones((nx*ny,d), device="cuda") * -5.5
         self.initial_scaling = torch.exp(scaling) * scale
 
         self.transform_size = d * (d - 1) // 2
@@ -508,7 +528,7 @@ class Model(nn.Module):
         self.dtransforms = deltas[2]
         self.du = deltas[3]
 
-        self.means = self.means + self.dmeans
+        # self.means = self.means + self.dmeans
         self.scaling = self.scaling * torch.exp(self.dscaling)
         self.transforms = self.transforms + self.dtransforms
         self.u = self.u + self.du
