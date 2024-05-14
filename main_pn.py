@@ -114,18 +114,18 @@ mean_loss = []
 log_step = 100
 n_samples = 1024
 
-optim = torch.optim.SGD(model.parameters(), lr=1e-4)
+optim = torch.optim.Adam(model.parameters())
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.9955)
 
-dt = 0.1
+dt = 1.0
 
 start = 0
 
 if len(sys.argv) > 1:
     state = torch.load(sys.argv[1])
     model.load_state_dict(state["model"])
-    model.set_initial_params(
-        model.initial_means, model.initial_u, model.initial_scaling, model.initial_transforms)
+    # model.set_initial_params(
+    #     model.initial_means.detach().data, model.initial_u.detach().data, model.initial_scaling.detach().data, model.initial_transforms.detach().data)
     optim.load_state_dict(state["optimizer"])
     start = state["epoch"]
     training_loss = state["training_loss"]
@@ -138,7 +138,7 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
     torch.autograd.set_detect_anomaly(True)
 
     n_samples = 1024
-    N = 1500
+    N = 5000
     log_step = 10
     save_step = 100
     bootstrap_rate = 50

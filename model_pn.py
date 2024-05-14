@@ -48,7 +48,7 @@ LATENT_SIZE = 64
 L1_SIZE = 16
 L2_SIZE = 32
 L3_SIZE = 32
-DISTANCE_EMBEDDINGS = 5
+DISTANCE_EMBEDDINGS = 23
 
 class LatentTransform(nn.Module):
     def __init__(self, in_channels, activation):
@@ -135,11 +135,22 @@ class InputTransform(nn.Module):
                self.transform_uxx @ uxx, \
                self.transform_pde @ pde \
 
-    def transform_gaussians(self, means, covariances, u):
-        covariances = covariances.reshape(-1, self.d, self.d)
+    def transform_gaussians(self, means, full_covariances, u, sample_u, ux, uxx, pde):
+        covariances = full_covariances.reshape(-1, self.d, self.d)
         means = means.reshape(-1, self.d, 1)
         u = u.reshape(-1, self.c, 1)
-        return self.transform @ means, self.transform @ covariances, self.transform_u @ u
+        sample_u = sample_u.reshape(-1, self.c, 1)
+        ux = ux.reshape(-1, self.d*self.c, 1)
+        uxx = uxx.reshape(-1, self.d*self.c, 1)
+        pde = pde.reshape(-1, self.pde_size, 1)
+
+        return self.transform @ means, \
+               self.transform @ covariances, \
+               self.transform_u @ u, \
+               self.transform_u @ sample_u, \
+               self.transform_ux @ ux, \
+               self.transform_uxx @ uxx, \
+               self.transform_pde @ pde \
 
 class FeatureTransform(nn.Module):
     def __init__(self, activation):
@@ -173,12 +184,13 @@ def delta_network(m, c, d, activation):
     )
 
 class DynamicsNetwork(nn.Module):
-    def __init__(self, c, d, pde_size, activation):
+    def __init__(self, c, d, pde_size, split_size, activation):
         super(DynamicsNetwork, self).__init__()
         self.c = c
         self.d = d
         self.transform_size = d * (d-1) // 2
         self.pde_size = pde_size
+        self.split_size = split_size
 
         self.input_transform = InputTransform(c, d, pde_size, activation)
         self.input_projection = nn.Sequential(
@@ -194,16 +206,22 @@ class DynamicsNetwork(nn.Module):
             nn.Linear(LATENT_SIZE, LATENT_SIZE),
             # nn.LayerNorm(LATENT_SIZE),
             activation(LATENT_SIZE),
-            nn.Linear(LATENT_SIZE, (DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, LATENT_SIZE),
+            # nn.LayerNorm(LATENT_SIZE),
+            activation(LATENT_SIZE),
+            nn.Linear(LATENT_SIZE, DISTANCE_EMBEDDINGS*LATENT_SIZE),
             # nn.LayerNorm((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
             # activation((DISTANCE_EMBEDDINGS*d + 1)*LATENT_SIZE),
             # nn.Linear(d*LATENT_SIZE, d*LATENT_SIZE),
         )
+        self.frequencies = nn.Parameter(
+            torch.randn((DISTANCE_EMBEDDINGS-d-1) // d // 2, device="cuda") * 10,
+            requires_grad=False
+        )
         self.delta_net = delta_network(1, c, d, activation)
+        # self.split_delta_net = delta_network(split_size, c, d, activation)
 
     def forward(self, means, full_covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
-        n, _ = means.shape
-
         t_means, t_covariances, t_u, t_sample_u, t_ux, t_uxx, t_pde = \
             self.input_transform(means, full_covariances, u, sample_u, sample_ux, sample_uxx, sample_pde)
 
@@ -216,75 +234,63 @@ class DynamicsNetwork(nn.Module):
         t_pde = t_pde.reshape(1, -1, self.pde_size)
         t_params = torch.cat((t_covariances, t_u, t_sample_u, t_ux, t_uxx, t_pde), dim=-1)
 
-        self.global_features = self.input_projection(t_params).transpose(1, 2) # 1, n, LATENT_SIZE
+        self.global_features = self.input_projection(t_params) # 1, n, LATENT_SIZE
 
-    def compute_deltas(self, sampler):
-        b, _, n = self.global_features.shape
-        e = DISTANCE_EMBEDDINGS*self.d+1
-
-        features = self.global_features.transpose(1, 2) # 1, n, LATENT_SIZE
+    def _compute_deltas(self, sampler, features, delta_net, size):
+        b, n, l = features.shape
 
         distance_transforms = \
-            self.distance_transform(features).reshape(b, n, -1, e) # 1, n, LATENT_SIZE, e
-        _, neighbor_features = \
-            sampler.aggregate_neighbors(features.squeeze(), distance_transforms.squeeze())
-        distance_transforms = \
-            self.distance_transform(neighbor_features).reshape(b, n, -1, e) # 1, n, LATENT_SIZE, e
-        _, neighbor_features = \
-            sampler.aggregate_neighbors(neighbor_features.squeeze(), distance_transforms.squeeze())
+            self.distance_transform(features).reshape(b, n, l, -1) # 1, n, LATENT_SIZE, -1
+        _, neighbor_features1 = sampler.aggregate_neighbors(
+            features.squeeze(0), self.frequencies, distance_transforms.squeeze(0))
+        # if torch.isnan(neighbor_features1.mean()):
+        #     for i in range(neighbor_features1.shape[0]):
+        #         if torch.isnan(neighbor_features1[i].mean()):
+        #             print(i, neighbor_features1[i])
+        # distance_transforms = \
+        #     self.distance_transform(combined_features).reshape(b, n, l, -1) # 1, n, LATENT_SIZE, -1
+        # _, neighbor_features2 = \
+        #     sampler.aggregate_neighbors(neighbor_features1, distance_transforms.squeeze(0))
 
         local_global_features = torch.cat((
             features,
-            neighbor_features.unsqueeze(0),
+            neighbor_features1.unsqueeze(0),
         ), dim=-1)
 
-        deltas = self.delta_net(local_global_features)
-        dmeans = deltas[...,:self.d].squeeze(0)
-        dscaling = deltas[...,self.d:2*self.d].squeeze(0)
-        dtransforms = deltas[...,2*self.d:2*self.d+self.transform_size].squeeze(0)
-        du = deltas[...,-self.c:].squeeze(0)
+        deltas = delta_net(local_global_features)
+        dmeans = deltas[...,:self.d*size].squeeze(0)
+        dscaling = deltas[...,self.d*size:2*self.d*size].squeeze(0)
+        dtransforms = deltas[...,2*self.d*size:(2*self.d+self.transform_size)*size].squeeze(0)
+        du = deltas[...,-self.c*size:].squeeze(0)
 
         return dmeans, dscaling, dtransforms, du
 
-    def transform_gaussians(self, means, covariances, u):
-        t_means, t_covariances, t_u = \
-            self.input_transform.transform_gaussians(means, covariances, u)
+    def compute_deltas(self, sampler):
+        features = self.global_features # 1, n, LATENT_SIZE
+        return self._compute_deltas(sampler, features, self.delta_net, 1)
+
+    def split(self, sampler, indices):
+        features = self.global_features[:,indices,:]\
+                       .reshape(-1, indices.shape[0], LATENT_SIZE) # 1, n, LATENT_SIZE
+        return self._compute_deltas(sampler, features, self.split_delta_net, self.split_size)
+
+    def transform_gaussians(self, means, full_covariances, u, sample_u, sample_ux, sample_uxx, sample_pde):
+        t_means, t_covariances, t_u, t_sample_u, t_ux, t_uxx, t_pde = \
+            self.input_transform.transform_gaussians(
+                means, full_covariances, u, sample_u, sample_ux, sample_uxx, sample_pde)
 
         t_means = t_means.reshape(1, -1, self.d)
-        t_covariances = t_covariances.reshape(1, -1, self.d*(self.d+1)//2)
+        t_covariances = t_covariances.reshape(1, -1, self.d*self.d)
         t_u = t_u.reshape(1, -1, self.c)
-        t_params = torch.cat((t_covariances, t_u), dim=-1)
+        t_sample_u = t_sample_u.reshape(1, -1, self.c)
+        t_ux = t_ux.reshape(1, -1, self.d*self.c)
+        t_uxx = t_uxx.reshape(1, -1, self.d*self.c)
+        t_pde = t_pde.reshape(1, -1, self.pde_size)
+        t_params = torch.cat((t_covariances, t_u, t_sample_u, t_ux, t_uxx, t_pde), dim=-1)
 
         features = self.input_projection(t_params) # 1, n, L1_SIZE
-        features = self.feature_transform.transform_features(features.transpose(1, 2)) # 1,L1_SIZE,n
-        self.features = torch.cat((self.features, features), dim=-1)
+        self.global_features = torch.cat((self.global_features, features), dim=-2)
 
-        #global_feature = self.feature_projection(features).mean(-1) # 1, LATENT_SIZE
-        #self.global_gaussians_feature = torch.mean(self.global_gaussians_feature, global_feature)
-
-class SplitNetwork(nn.Module):
-    def __init__(self, c, d, split_size, activation):
-        super(SplitNetwork, self).__init__()
-        self.c = c
-        self.d = d
-        self.transform_size = d * (d-1) // 2
-        self.split_size = split_size
-
-        self.delta_net = delta_network(self.split_size, c, d, activation)
-
-    def forward(self, feature, global_feature):
-        local_global_feature = torch.cat((feature, global_feature), dim=-1)
-        deltas = self.delta_net(local_global_feature)
-
-        dscaling = deltas[...,:self.d*self.split_size].squeeze(0)
-
-        start = self.d*self.split_size
-        end = start+self.transform_size*self.split_size
-        dtransforms = deltas[...,start:end].squeeze(0)
-
-        du = deltas[...,-self.c*self.split_size:].squeeze(0)
-
-        return dscaling, dtransforms, du
 
 class Model(nn.Module):
     def __init__(self, problem, rule, nx, ny, d, scale):
@@ -311,10 +317,10 @@ class Model(nn.Module):
         tx = torch.linspace(-1, 1, nx).cuda() * scale
         ty = torch.linspace(-1, 1, ny).cuda() * scale
         gx, gy = torch.meshgrid((tx,ty), indexing="ij")
-        self.initial_means = torch.stack((gx,gy), dim=-1)
+        self.initial_means = torch.stack((gx,gy), dim=-1)# * 0
         self.initial_means = self.initial_means.reshape(-1, d)
 
-        scaling = torch.ones((nx*ny,d), device="cuda") * -4.5
+        scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
         self.initial_scaling = torch.exp(scaling) * scale
 
         self.transform_size = d * (d - 1) // 2
@@ -325,9 +331,9 @@ class Model(nn.Module):
 
             sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, d, 1)
             samples = self.initial_means.unsqueeze(-1) - sample_mean
-            conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1 * self.scale)
+            conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1 * scale)
             powers = -0.5 * (samples.transpose(-1, -2) @ (conics @ samples))
-            self.initial_u = torch.exp(powers).squeeze(-1) / 4.0
+            self.initial_u = torch.exp(powers).squeeze(-1) / 5.0
 
         elif problem == Problem.WAVE:
             self.channels = 2
@@ -346,8 +352,8 @@ class Model(nn.Module):
             return nn.Tanh()
             # return RBFAct(in_dim)
 
-        self.dynamics_network = DynamicsNetwork(self.channels, d, self.channels, activation).cuda()
-        # self.split_network = SplitNetwork(self.channels, d, self.split_size, activation).cuda()
+        self.dynamics_network = \
+            DynamicsNetwork(self.channels, d, self.channels, self.split_size, activation).cuda()
 
         self.set_initial_params(
             self.initial_means, self.initial_u, self.initial_scaling, self.initial_transforms)
@@ -366,13 +372,14 @@ class Model(nn.Module):
         self.reset()
 
     def reset(self):
-        self.u = self.initial_u + 0
-        self.means = self.initial_means + 0
-        self.scaling = self.initial_scaling + 0
-        self.transforms = self.initial_transforms + 0
-        covariances, conics = gaussians.build_covariances(self.scaling, self.transforms)
-        self.covariances = covariances
-        self.conics = conics
+        self.u = self.initial_u.detach() + 0
+        self.means = self.initial_means.detach() + 0
+        self.scaling = self.initial_scaling.detach() + 0
+        self.transforms = self.initial_transforms.detach() + 0
+        self.full_covariances, self.full_conics = \
+            gaussians.build_full_covariances(self.scaling,self.transforms)
+        self.covariances, self.conics = \
+            gaussians.flatten_covariances(self.full_covariances, self.full_conics)
 
         self.clear()
 
@@ -389,24 +396,53 @@ class Model(nn.Module):
         self.transforms = self.transforms.detach()
         self.covariances = self.covariances.detach()
         self.conics = self.conics.detach()
+        self.full_covariances = self.full_covariances.detach()
+        self.full_conics = self.full_conics.detach()
 
-    def split(self, indices, scale):
-        feature = self.dynamics_network.features[indices]
-        global_feature = self.dynamics_network.global_feature
-        dscaling, dtransforms, du = self.split_network(feature, global_feature)
+    def split(self, indices):
+        self.sampler.preprocess(self.means[indices], self.u[indices], self.covariances[indices], self.conics[indices], self.means[indices])
+        dmeans, dscaling, dtransforms, du = self.dynamics_network.split(self.sampler, indices)
 
-        full_covariances, full_conics = gaussians.build_full_covariances(self.scaling, self.transforms)
-        eigvals, eigvecs = torch.linalg.eig(full_covariances[indices])
-        eigvecs = eigvecs * eigvals
+        # Performing backwards pass through eigen decomposition is unstable
+        with torch.no_grad():
+            eigvals, eigvecs = torch.linalg.eig(self.full_covariances[indices])
+            # eigvecs = eigvecs.real * eigvals.real
+            # torch.tensor([-eigvecs[0], eigvecs[0], -eigvecs[1], eigvecs[1]], device="cuda")
 
-        split_means = self.means[indices].unsqueeze(0) + \
-                      torch.tensor([-eigvecs[0], eigvecs[0], -eigvecs[1], eigvecs[1]], device="cuda")
-        split_scaling = self.scaling[indices].unsqueeze(0) / 2.0 + dscaling
-        split_transforms = self.scaling[indices].unsqueeze(0) + dtransforms
-        split_covariances, split_conics = gaussians.build_covariances(split_scaling,split_transforms)
-        split_u = du
+        n = indices.shape[0]
 
-        self.dynamics_network.transform_gaussians(split_means, split_covariances, split_u)
+        split_means = (self.means[indices].repeat(1, self.split_size).reshape(n, -1, self.d) \
+                    + 3 * eigvals.real.amax(-1).reshape(n, 1, 1)
+                    * dmeans.reshape(n, -1, self.d)).reshape(-1, self.d)
+        half_scale = self.scaling[indices].repeat(1, self.split_size).reshape(n, -1, self.d) * 0.5
+        split_scaling = (half_scale * torch.exp(dscaling.reshape(n, -1, self.d))).reshape(-1, self.d)
+        split_transforms = \
+            (self.transforms[indices].repeat(1, self.split_size).reshape(n, -1, self.transform_size)\
+            + dtransforms.reshape(n, -1, self.transform_size)).reshape(-1, self.transform_size)
+        split_u = du.reshape(-1, self.channels)
+
+        split_full_covariances, split_full_conics = \
+            gaussians.build_full_covariances(split_scaling, split_transforms)
+        split_covariances, split_conics = \
+            gaussians.flatten_covariances(split_full_covariances, split_full_conics)
+
+        with torch.no_grad():
+            n = split_means.shape[0]
+
+            self.sampler.preprocess(
+                split_means, split_u, split_covariances, split_conics, split_means)
+
+            sample_u = self.sampler.sample_gaussians() # n, c
+            sample_ux = self.sampler.sample_gaussians_derivative() # n, d, c
+            sample_uxx = self.sampler.sample_gaussians_laplacian() # n, d, d, c
+            sample_pde = self.pde_rhs(split_means, sample_u, sample_ux, sample_uxx).reshape(n, -1)
+            # sample_pde = torch.zeros((n, self.channels), device="cuda")
+
+            sample_ux = sample_ux.reshape(n, -1)
+            sample_uxx = torch.stack((sample_uxx[:,0,0], sample_uxx[:,1,1]), dim=-2).reshape(n, -1)
+
+        self.dynamics_network.transform_gaussians(
+            split_means, split_full_covariances, split_u, sample_u, sample_ux, sample_uxx,sample_pde)
 
         self.means = torch.cat((self.means, split_means), dim=0)
         self.scaling = torch.cat((self.scaling, split_scaling), dim=0)
@@ -444,14 +480,9 @@ class Model(nn.Module):
             raise ValueError("Unexpected PDE problem:", self.problem)
 
     def forward(self, t, dt):
-        full_covariances,full_conics = gaussians.build_full_covariances(self.scaling,self.transforms)
-        covariances, conics = gaussians.flatten_covariances(full_covariances, full_conics)
-        self.covariances = covariances
-        self.conics = conics
-
-        n = self.means.shape[0]
-
         with torch.no_grad():
+            n = self.means.shape[0]
+
             self.sampler.preprocess(self.means, self.u, self.covariances, self.conics, self.means)
 
             sample_u = self.sampler.sample_gaussians() # n, c
@@ -465,9 +496,11 @@ class Model(nn.Module):
             sample_uxx = torch.stack((sample_uxx[:,0,0], sample_uxx[:,1,1]), dim=-2).reshape(n, -1)
 
         self.dynamics_network(
-            self.means, full_covariances, self.u, sample_u, sample_ux, sample_uxx, sample_pde)
+            self.means, self.full_covariances, self.u, sample_u, sample_ux, sample_uxx, sample_pde)
 
         # TODO: Split
+        # self.split(torch.tensor([0], dtype=torch.long, device="cuda"))
+        # self.sampler.preprocess(self.means, self.u, self.covariances, self.conics, self.means)
 
         deltas = self.dynamics_network.compute_deltas(self.sampler)
         self.dmeans = deltas[0]
@@ -479,6 +512,11 @@ class Model(nn.Module):
         self.scaling = self.scaling * torch.exp(self.dscaling)
         self.transforms = self.transforms + self.dtransforms
         self.u = self.u + self.du
+
+        self.full_covariances, self.full_conics = \
+            gaussians.build_full_covariances(self.scaling,self.transforms)
+        self.covariances, self.conics = \
+            gaussians.flatten_covariances(self.full_covariances, self.full_conics)
 
     def sample(self, samples, bc_samples):
         self.sampler.preprocess(self.means, self.u, self.covariances, self.conics, samples)
@@ -574,17 +612,17 @@ class Model(nn.Module):
     def generate_images(self, res):
         if self.problem == Problem.WAVE:
             img1 = gaussians.sample_gaussians_img(
-                self.means, self.conics, self.u[...,0], res, res, self.scale
+                self.means, self.full_conics, self.u[...,0], res, res, self.scale
             ).detach().cpu().numpy()
 
             img2 = gaussians.sample_gaussians_img(
-                self.means, self.conics, self.u[...,1], res, res, self.scale
+                self.means, self.full_conics, self.u[...,1], res, res, self.scale
             ).detach().cpu().numpy()
 
             return np.stack([img1, img2])
         else:
             img1 = gaussians.sample_gaussians_img(
-                self.means, self.conics, self.u, res, res, self.scale
+                self.means, self.full_conics, self.u, res, res, self.scale
             ).detach().cpu().numpy()
 
             return img1
