@@ -10,8 +10,9 @@ import gaussians
 
 from diff_gaussian_sampling import GaussianSampler
 
-nx = 25
-ny = 25
+gradcheck = True
+
+nx = ny = 5 if gradcheck else 25
 d = 2
 
 scale = 1.0
@@ -22,7 +23,7 @@ tx = torch.linspace(-1, 1, nx).cuda() * scale
 ty = torch.linspace(-1, 1, ny).cuda() * scale
 gx, gy = torch.meshgrid((tx,ty), indexing="ij")
 means = torch.stack((gx,gy), dim=-1).reshape(nx*ny, d)
-scaling = torch.exp(torch.ones((nx*ny,d), device="cuda") * -4.0)
+scaling = torch.exp(torch.ones((nx*ny,d), device="cuda") * (-1.5 if gradcheck else -4.0))
 transforms = torch.zeros((nx*ny, d * (d - 1) // 2), device="cuda")
 
 # samples = means.unsqueeze(-1) * 4
@@ -46,13 +47,14 @@ ty = torch.linspace(-1, 1, res).cuda() * scale
 gx, gy = torch.meshgrid((tx, ty), indexing="xy")
 samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
 
-# means = means.to(torch.float64)
-# scaling = scaling.to(torch.float64)
-# transforms = transforms.to(torch.float64)
-# covariances = covariances.to(torch.float64)
-# conics = conics.to(torch.float64)
-# values = values.to(torch.float64)
-# samples = samples.to(torch.float64)
+if gradcheck:
+    means = means.to(torch.float64)
+    scaling = scaling.to(torch.float64)
+    transforms = transforms.to(torch.float64)
+    covariances = covariances.to(torch.float64)
+    conics = conics.to(torch.float64)
+    values = values.to(torch.float64)
+    samples = samples.to(torch.float64)
 
 sampler = GaussianSampler(True)
 sampler.preprocess(means, values, covariances, conics, samples)
@@ -64,35 +66,45 @@ plt.axis("off")
 plt.colorbar()
 # plt.show()
 
-LATENT_SIZE = 8
+LATENT_SIZE = 2 if gradcheck else 16
 KEY_SIZE = 4
 EMBEDDING_SIZE = 21
 FREQ_SIZE = (EMBEDDING_SIZE-1) // d // 2
 
-# features = torch.rand((nx*ny, LATENT_SIZE), device="cuda").to(torch.float64)
-# transforms = torch.rand((nx*ny, LATENT_SIZE), device="cuda").to(torch.float64)
-# queries = torch.rand((nx*ny, KEY_SIZE), device="cuda").to(torch.float64)
-# keys = torch.rand((nx*ny, KEY_SIZE), device="cuda").to(torch.float64)
-# frequencies = torch.randn(FREQ_SIZE, device="cuda").to(torch.float64) * 10
-# distance_transform = torch.rand((LATENT_SIZE, EMBEDDING_SIZE), device="cuda").to(torch.float64)
-# 
-# features.requires_grad = True
-# transforms.requiers_grad = True
-# queries.requiers_grad = True
-# keys.requiers_grad = True
-# frequencies.requires_grad = True
-# distance_transform.requires_grad = True
-# 
-# def test_func(features, transforms, queries, keys, frequencies, distance_transform):
-#     _, local_features = sampler.aggregate_neighbors(features, transforms, queries, keys, frequencies, distance_transform)
-#     return local_features
-# 
-# # test_func(features, queries, frequencies, distance_transform)
-# torch.autograd.gradcheck(test_func, (features, transforms, queries, keys, frequencies, distance_transform))
-# print("Check")
-# exit()
+if gradcheck:
+    features = torch.rand((nx*ny, LATENT_SIZE), device="cuda").to(torch.float64)
+    transform = torch.rand((LATENT_SIZE, LATENT_SIZE), device="cuda").to(torch.float64)
+    queries = torch.rand((nx*ny, KEY_SIZE), device="cuda").to(torch.float64)
+    keys = torch.rand((nx*ny, KEY_SIZE), device="cuda").to(torch.float64)
+    frequencies = torch.randn(FREQ_SIZE, device="cuda").to(torch.float64) * 10
+    distance_transform = torch.rand((LATENT_SIZE, EMBEDDING_SIZE*2), device="cuda").to(torch.float64)
+
+    features.requires_grad = True
+    transform.requires_grad = True
+    queries.requires_grad = True
+    keys.requires_grad = True
+    frequencies.requires_grad = True
+    distance_transform.requires_grad = True
+
+    def test_func(features, transform, queries, keys, frequencies, distance_transform):
+        local_features = sampler.aggregate_neighbors(
+            features, transform, queries, keys, frequencies, distance_transform)
+        return local_features
+
+    start = time.time()
+
+    sampler.preprocess_aggregate()
+    torch.autograd.gradcheck(
+        test_func, (features, transform, queries, keys, frequencies, distance_transform))
+
+    print("Check:", time.time() - start)
+    exit()
 
 activation = nn.ReLU()
+
+heads = 2
+
+norms = [nn.LayerNorm(LATENT_SIZE).cuda() for _ in range(heads)]
 
 input_projection = nn.Sequential(
     nn.Linear(1, LATENT_SIZE // 2),
@@ -102,63 +114,37 @@ input_projection = nn.Sequential(
     nn.Linear(LATENT_SIZE, LATENT_SIZE),
     # activation,
 ).cuda()
+output_projection = nn.Sequential(
+    nn.Linear(heads * LATENT_SIZE, LATENT_SIZE),
+    activation,
+    nn.Linear(LATENT_SIZE, LATENT_SIZE // 2),
+    activation,
+    nn.Linear(LATENT_SIZE // 2, 1),
+    # activation,
+).cuda()
 
-# distance_transform_left = nn.Sequential(
-#     nn.Linear(LATENT_SIZE, LATENT_SIZE),
-#     activation,
-#     nn.Linear(LATENT_SIZE, (LATENT_SIZE + LATENT_SIZE*KEY_SIZE)//2),
-#     activation,
-#     nn.Linear((LATENT_SIZE + LATENT_SIZE*KEY_SIZE)//2, LATENT_SIZE*KEY_SIZE),
-#     # activation,
-# ).cuda()
-# 
-# distance_transform_right = nn.Sequential(
-#     nn.Linear(LATENT_SIZE, LATENT_SIZE),
-#     activation,
-#     nn.Linear(LATENT_SIZE, (LATENT_SIZE + KEY_SIZE*EMBEDDING_SIZE)//2),
-#     activation,
-#     nn.Linear((LATENT_SIZE + KEY_SIZE*EMBEDDING_SIZE)//2, KEY_SIZE*EMBEDDING_SIZE),
-#     # activation,
-# ).cuda()
-
-distance_transform = torch.rand((LATENT_SIZE, EMBEDDING_SIZE), device="cuda")
-transform = nn.Sequential(
-    nn.Linear(LATENT_SIZE, LATENT_SIZE),
-    activation,
-    nn.Linear(LATENT_SIZE, LATENT_SIZE),
-    activation,
-    nn.Linear(LATENT_SIZE, LATENT_SIZE),
-).cuda()
-query_transform = nn.Sequential(
-    nn.Linear(LATENT_SIZE, LATENT_SIZE),
-    activation,
-    nn.Linear(LATENT_SIZE, (LATENT_SIZE+KEY_SIZE)//2),
-    activation,
-    nn.Linear((LATENT_SIZE+KEY_SIZE)//2, KEY_SIZE),
-).cuda()
-key_transform = nn.Sequential(
-    nn.Linear(LATENT_SIZE, LATENT_SIZE),
-    activation,
-    nn.Linear(LATENT_SIZE, (LATENT_SIZE+KEY_SIZE)//2),
-    activation,
-    nn.Linear((LATENT_SIZE+KEY_SIZE)//2, KEY_SIZE),
-).cuda()
+distance_transform = torch.rand((LATENT_SIZE, EMBEDDING_SIZE*2), device="cuda")
+transform = torch.rand((heads, LATENT_SIZE, LATENT_SIZE), device="cuda")
+query_transform = torch.rand((heads, KEY_SIZE, LATENT_SIZE), device="cuda")
+key_transform = torch.rand((heads, KEY_SIZE, LATENT_SIZE), device="cuda")
 frequencies = torch.randn(FREQ_SIZE, device="cuda") * 10
-expected = torch.zeros((nx*ny, LATENT_SIZE), device="cuda")
+expected = torch.zeros((nx*ny, 1), device="cuda")
 
 for i in range(nx):
     if (i % 5) == 0:
         for j in range(ny):
             expected[(i + 1) * ny + j] = 1.0
 
+transform = nn.Parameter(transform)
 distance_transform = nn.Parameter(distance_transform)
 frequencies = nn.Parameter(frequencies)
 parameters = nn.ParameterList([
     distance_transform,
-    *transform.parameters(),
-    *query_transform.parameters(),
-    *key_transform.parameters(),
+    transform,
+    query_transform,
+    key_transform,
     *input_projection.parameters(),
+    *output_projection.parameters(),
     frequencies,
 ])
 print(sum(p.numel() for p in parameters))
@@ -166,20 +152,38 @@ print(sum(p.numel() for p in parameters))
 optim = torch.optim.Adam(parameters, lr=1e-3)
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.999)
 
+sampler.preprocess(means, values, covariances, conics, means)
+
 start = time.time()
 for i in range(2000):
     features = input_projection(values)
-    transforms = transform(features)
-    queries = query_transform(features)
-    keys = key_transform(features)
-    # dt_left = distance_transform_left(features).reshape(-1, LATENT_SIZE, KEY_SIZE)
-    # dt_right = distance_transform_right(features).reshape(-1, KEY_SIZE, EMBEDDING_SIZE)
-    # distance_transform = dt_left @ dt_right
-    indices, local_features = sampler.aggregate_neighbors(
-        features, transforms, queries, keys, frequencies, distance_transform)
-    # indices, local_features = sampler.aggregate_neighbors(local_features, frequencies, distance_transform)
-    loss = torch.mean((local_features - expected) ** 2)
+    all_features = None
+    sampler.preprocess_aggregate()
+
+    magnitudes = torch.zeros(heads, device="cuda")
+
+    for j in range(heads):
+        queries = (query_transform[j] @ features.unsqueeze(-1)).squeeze(-1)
+        keys = (key_transform[j] @ features.unsqueeze(-1)).squeeze(-1)
+        local_features = sampler.aggregate_neighbors(
+            features, transform[j], queries, keys, frequencies, distance_transform)
+        magnitudes[j] = (local_features ** 2).mean()
+        local_features = norms[j](local_features)
+        if all_features == None:
+            all_features = local_features
+        else:
+            all_features = torch.cat((all_features, local_features), dim=-1)
+
+    # for j in range(heads):
+    #     all_features[...,j*LATENT_SIZE:(j+1)*LATENT_SIZE] /= torch.sqrt(magnitudes[j])
+
+    output = output_projection(all_features)
+    loss = torch.mean((output - expected) ** 2)
+    magnitude_loss = ((magnitudes - magnitudes.mean()) ** 2).sum()
+    # loss += loss.item() * magnitude_loss
     if (i % 100) == 0:
+        print(magnitudes)
+        print("Magnitude loss:", magnitude_loss.item())
         print("Loss:", loss.item())
     loss.backward()
     optim.step()
@@ -190,8 +194,8 @@ print(time.time() - start)
 exit()
 
 features = torch.rand((nx*ny, LATENT_SIZE), device="cuda")
-distance_transforms = torch.rand((nx*ny, LATENT_SIZE, d*DISTANCE_EMBEDDINGS + 1), device="cuda")
-indices, local_features = sampler.aggregate_neighbors(features, distance_transforms)
+distance_transform = torch.rand((nx*ny, LATENT_SIZE, d*DISTANCE_EMBEDDINGS + 1), device="cuda")
+local_features = sampler.aggregate_neighbors(features, distance_transform)
 
 for i in range(nx):
     print(features[i * ny])

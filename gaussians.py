@@ -161,9 +161,9 @@ def gaussian_derivative2(means, conics, values, samples):
 #     return rendered_image.transpose(0, -1)
 
 def build_full_covariances(s, t):
-    t = torch.tanh(t)
+    t = torch.tanh(t) * s.prod(-1).sqrt().unsqueeze(-1)
     S = torch.diag_embed(s)
-    T = torch.diag_embed(torch.zeros(s.shape, device="cuda"))
+    # T = torch.diag_embed(torch.zeros(s.shape, device="cuda"))
     # c = torch.cos(t).squeeze()
     # s = torch.sin(t).squeeze()
     # T[:,0,0] = c
@@ -172,10 +172,12 @@ def build_full_covariances(s, t):
     # T[:,1,0] = s
     indices = torch.tril_indices(s.shape[-1], s.shape[-1], -1)
 
-    T[..., indices[0], indices[1]] = t
-    T = T + torch.diag_embed(torch.ones(s.shape, device="cuda"))
+    S[..., indices[0], indices[1]] = t
+    S[..., indices[1], indices[0]] = t
+    # T = T + torch.diag_embed(torch.ones(s.shape, device="cuda"))
 
-    covariances = T @ S @ torch.transpose(T, -1, -2)
+    # covariances = T @ S @ torch.transpose(T, -1, -2)
+    covariances = S
     conics = torch.inverse(covariances)
 
     return covariances, conics
