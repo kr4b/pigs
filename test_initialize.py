@@ -14,7 +14,7 @@ import gaussians
 
 from diff_gaussian_sampling import GaussianSampler
 
-nx = ny = 30
+nx = ny = 50
 d = 2
 
 torch.manual_seed(0)
@@ -23,7 +23,7 @@ tx = torch.linspace(-1, 1, nx).cuda()
 ty = torch.linspace(-1, 1, ny).cuda()
 gx, gy = torch.meshgrid((tx, ty), indexing="ij")
 raw_means = torch.stack((gx, gy), dim=-1).reshape(nx*ny,d)
-raw_scaling = torch.ones((nx*ny, 2), device="cuda") * -4.0
+raw_scaling = torch.ones((nx*ny, 2), device="cuda") * -5.0
 transforms = torch.zeros((nx*ny, d * (d - 1) // 2), device="cuda")
 values = torch.zeros((nx*ny, 1), device="cuda")
 
@@ -32,17 +32,18 @@ frequency = None
 
 if len(sys.argv) > 1:
     if sys.argv[1] == "gaussian":
-        sample_mean = torch.tensor([0.0, 0.0], device="cuda").reshape(1, d, 1)
+        sample_mean = torch.tensor([0.2, 0.0], device="cuda").reshape(1, d, 1)
+        sample_mean2 = torch.tensor([-0.6, 0.0], device="cuda").reshape(1, d, 1)
     elif sys.argv[1] == "sinusoid":
         frequency = 1.5 * np.pi
     elif sys.argv[1] == "f":
         f_index = int(sys.argv[2])
 
-        with h5py.File("../training_data/ns_V1e-3_N5000_T50.mat", "r") as file:
-            f = np.transpose(file["u"][...,f_index], (1, 2, 0))
+        file = np.load("ns_V1e-4_N1000_T30.npy")
+        f = np.transpose(file[...,f_index], (1, 2, 0))
 
         # f = scipy.io.loadmat("../training_data/ns_V1e-5_N1200_T20.mat")["u"][f_index]
-        desired = f[:,:,0]
+        desired = f[:,:,18]
         desired = torch.from_numpy(desired).to(torch.float).cuda()
         res = desired.shape[0]
 
@@ -77,22 +78,22 @@ raw_scaling = nn.Parameter(raw_scaling)
 transforms = nn.Parameter(transforms)
 
 optim = torch.optim.Adam([
-    { "name": "means", "params": raw_means },#, "lr": 5e-3 },
+    { "name": "means", "params": raw_means, "lr": 5e-3 },
     { "name": "values", "params": values },
-    { "name": "scaling", "params": raw_scaling },#, "lr": 5e-2 },
-    { "name": "transforms", "params": transforms }#, "lr": 1e-2 }
-], lr=1e-4)
+    { "name": "scaling", "params": raw_scaling, "lr": 5e-2 },
+    { "name": "transforms", "params": transforms, "lr": 5e-2 }
+], lr=1e-3)
 scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, gamma=0.95)
 
 log_step = 100
-split_step = log_step * 5000 + 1
-densification_step = log_step * 10000 + 11
+split_step = log_step * 100 + 1
+densification_step = log_step * 300 + 11
 
 losses = []
 max_mean_grad = []
 max_scale_grad = []
 
-for i in range(100000):
+for i in range(6000):
     samples = torch.rand((1024, d), device="cuda") * 2.0 - 1.0
 
     if len(sys.argv) > 1:# and sys.argv[1] == "f":
@@ -115,10 +116,14 @@ for i in range(100000):
         img = sampler.sample_gaussians().reshape(1024)
 
     if sample_mean is not None:
-        samples = samples.unsqueeze(-1) - sample_mean
+        samples_ = samples.unsqueeze(-1) - sample_mean
         conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1)
-        powers = -0.5 * (samples.transpose(-1, -2) @ (conics @ samples))
-        desired = torch.exp(powers).squeeze()
+        powers = -0.5 * (samples_.transpose(-1, -2) @ (conics @ samples_))
+        desired = torch.exp(powers).squeeze() * 0.5
+        samples_ = samples.unsqueeze(-1) - sample_mean2
+        conics = torch.inverse(torch.diag(torch.tensor([0.025, 0.1], device="cuda")))
+        powers = -0.5 * (samples_.transpose(-1, -2) @ (conics @ samples_))
+        desired += torch.exp(powers).squeeze()
         loss = torch.mean((img - desired) ** 2)
     elif frequency is not None:
         desired = torch.cos(frequency * samples[:,0]) * torch.cos(frequency * samples[:,1])
@@ -146,7 +151,7 @@ for i in range(100000):
     loss.backward()
 
     if ((i+1) % log_step) == 0:
-        # scheduler.step()
+        scheduler.step()
 
         mean_grad = raw_means.grad
         mean_grad_norm = torch.norm(mean_grad, dim=-1)
@@ -175,6 +180,7 @@ for i in range(100000):
             raw_means[oob] += 2.0
 
     if ((i+1) % densification_step) == 0:
+        means.data += torch.randn_like(means).clamp(-1, 1) * 0.01
         values.data *= 0.0
 
     if ((i+1) % split_step) == 0:
@@ -252,12 +258,12 @@ for i in range(100000):
 
     prev_loss = loss.item()
 
-keep_mask = torch.norm(values, dim=-1) > 0.05
-print(keep_mask.sum().item())
-raw_means = raw_means[keep_mask]
-values = values[keep_mask]
-raw_scaling = raw_scaling[keep_mask]
-transforms = transforms[keep_mask]
+# keep_mask = torch.norm(values, dim=-1) > 0.01
+# print(keep_mask.sum().item())
+# raw_means = raw_means[keep_mask]
+# values = values[keep_mask]
+# raw_scaling = raw_scaling[keep_mask]
+# transforms = transforms[keep_mask]
 
 if len(sys.argv) > 1:# and sys.argv[1] == "f":
     means = raw_means
@@ -265,13 +271,21 @@ else:
     means = torch.tanh(raw_means)
 scaling = torch.exp(raw_scaling)
 
-if len(sys.argv) > 1 and sys.argv[1] == "f":
-    torch.save({
-        "means": means,
-        "values": values,
-        "scaling": scaling,
-        "transforms": transforms,
-    }, "initialization/V1e-3/f_{}-small.pt".format(f_index))
+# print(transforms.min().item(), transforms.max().item(), transforms.mean().item()) 
+# if len(sys.argv) > 1 and sys.argv[1] == "f":
+#     torch.save({
+#         "means": means,
+#         "values": values,
+#         "scaling": scaling,
+#         "transforms": transforms,
+#     }, "initialization/V1e-3/f_{}-10-small.pt".format(f_index))
+
+# torch.save({
+#     "means": means,
+#     "values": values,
+#     "scaling": scaling,
+#     "transforms": transforms,
+# }, "initialization/double_gaussian2.pt")
 
 full_covariances, full_conics = gaussians.build_full_covariances(scaling, transforms)
 # full_covariances = scaling.unsqueeze(-1) \
@@ -280,7 +294,7 @@ full_covariances, full_conics = gaussians.build_full_covariances(scaling, transf
 covariances, conics = gaussians.flatten_covariances(full_covariances, full_conics)
 
 gaussians.plot_gaussians(means, covariances, values)
-plt.savefig("initialize_gaussians.pdf")
+plt.savefig("initialize_gaussians.png")
 # plt.savefig("../../notes/figures/sinusoid_gaussians.png")
 
 plt.figure()
@@ -288,51 +302,56 @@ plt.plot(np.arange(0, len(losses)*100, 100), losses)
 plt.yscale("log")
 plt.savefig("initialize_loss.png")
 
-plt.figure()
-plt.plot(np.arange(0, len(losses)*100, 100), max_mean_grad)
-plt.yscale("log")
-plt.savefig("max_mean_grad.png")
+# plt.figure()
+# plt.plot(np.arange(0, len(losses)*100, 100), max_mean_grad)
+# plt.yscale("log")
+# plt.savefig("max_mean_grad.png")
+# 
+# plt.figure()
+# plt.plot(np.arange(0, len(losses)*100, 100), max_scale_grad)
+# plt.yscale("log")
+# plt.savefig("max_scale_grad.png")
 
-plt.figure()
-plt.plot(np.arange(0, len(losses)*100, 100), max_scale_grad)
-plt.yscale("log")
-plt.savefig("max_scale_grad.png")
+# res = 256
+for res in [4, 16, 32, 64, 128]:
+    tx = torch.linspace(-1, 1, res).cuda()
+    ty = torch.linspace(-1, 1, res).cuda()
+    gx, gy = torch.meshgrid((tx, ty), indexing="xy")
+    samples = torch.stack((gx, gy), dim=-1).reshape(res*res, 2)
 
-res = 256
+    sampler.preprocess(means, values, covariances, conics, samples)
+    if len(sys.argv) > 1 and sys.argv[1] == "f":
+        ux = sampler.sample_gaussians_derivative().reshape(res, res, d, 2)
+        img = ux[...,0,1] - ux[...,1,0]
+    else:
+        img = sampler.sample_gaussians().reshape(res, res)
 
-tx = torch.linspace(-1, 1, res).cuda()
-ty = torch.linspace(-1, 1, res).cuda()
-gx, gy = torch.meshgrid((tx, ty), indexing="xy")
-samples = torch.stack((gx, gy), dim=-1).reshape(res*res, 2)
+    if sample_mean is not None:
+        samples_ = samples.unsqueeze(-1) - sample_mean
+        conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1)
+        powers = -0.5 * (samples_.transpose(-1, -2) @ (conics @ samples_))
+        desired = torch.exp(powers).squeeze() * 0.5
+        samples_ = samples.unsqueeze(-1) - sample_mean2
+        conics = torch.inverse(torch.diag(torch.tensor([0.025, 0.1], device="cuda")))
+        powers = -0.5 * (samples_.transpose(-1, -2) @ (conics @ samples_))
+        desired += torch.exp(powers).squeeze()
+        desired = desired.reshape(res, res)
+    if frequency is not None:
+        desired = \
+            (torch.cos(frequency * samples[:,0]) * torch.cos(frequency * samples[:,1])).reshape(res, res)
 
-sampler.preprocess(means, values, covariances, conics, samples)
-if len(sys.argv) > 1 and sys.argv[1] == "f":
-    ux = sampler.sample_gaussians_derivative().reshape(res, res, d, 2)
-    img = ux[...,0,1] - ux[...,1,0]
-else:
-    img = sampler.sample_gaussians().reshape(res, res)
+    vmin = torch.min(desired)
+    vmax = torch.max(desired)
 
-if sample_mean is not None:
-    samples = samples.unsqueeze(-1) - sample_mean
-    conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1)
-    powers = -0.5 * (samples.transpose(-1, -2) @ (conics @ samples))
-    desired = torch.exp(powers).reshape(res, res)
-if frequency is not None:
-    desired = \
-        (torch.cos(frequency * samples[:,0]) * torch.cos(frequency * samples[:,1])).reshape(res, res)
-
-vmin = torch.min(desired)
-vmax = torch.max(desired)
-
-fig = plt.figure(figsize=(9, 4))
-ax = fig.subplots(1, 2)
-im = ax[0].imshow(img.detach().cpu().numpy(), vmin=vmin, vmax=vmax)
-ax[0].axis("off")
-ax[0].invert_yaxis()
-im = ax[1].imshow(desired.detach().cpu().numpy(), vmin=vmin, vmax=vmax)
-ax[1].axis("off")
-ax[1].invert_yaxis()
-cbar_ax = fig.add_axes([0.925, 0.1, 0.025, 0.8])
-fig.colorbar(im, cax=cbar_ax)
-plt.savefig("initialize.png")
+    fig = plt.figure(figsize=(9, 4))
+    ax = fig.subplots(1, 2)
+    im = ax[0].imshow(img.detach().cpu().numpy(), vmin=vmin, vmax=vmax, cmap="plasma")
+    ax[0].axis("off")
+    ax[0].invert_yaxis()
+    im = ax[1].imshow(desired.detach().cpu().numpy(), vmin=vmin, vmax=vmax, cmap="plasma")
+    ax[1].axis("off")
+    ax[1].invert_yaxis()
+    cbar_ax = fig.add_axes([0.925, 0.1, 0.025, 0.8])
+    fig.colorbar(im, cax=cbar_ax)
+    plt.savefig("../../notes/defense/continuous/initialize_{}.png".format(res))
 # plt.savefig("../../notes/figures/sinusoid.png")

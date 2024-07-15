@@ -41,11 +41,7 @@ class RBFAct(nn.Module):
     def forward(self, x):
         return torch.exp(-self.b * (x - self.c) ** 2)
 
-# LATENT_SIZE = 512
-# L1_SIZE = 64
-# L2_SIZE = 128
-# L3_SIZE = 256
-LATENT_SIZE = 64
+LATENT_SIZE = 16
 L1_SIZE = 16
 L2_SIZE = 32
 L3_SIZE = 48
@@ -116,7 +112,6 @@ class InputTransform(nn.Module):
             (means, covariances, u, boundaries, sample_u, ux, uxx, pde), dim=-1).transpose(1, 2)
 
         latent = self.latent_net(params).mean(-1) # 1, LATENT_SIZE
-        # latent = torch.cat((latent, feature), dim=-1)
         self.transform = self.transform_net(latent) # 1, d, d
         self.transform_u = self.transform_u_net(latent) # 1, c, c
         self.transform_ux = self.transform_ux_net(latent) # 1, d*c, d*c
@@ -160,10 +155,10 @@ def delta_network(m, in_dims, c, d, activation):
     transform_size = d * (d-1) // 2
     l = ATTENTION_HEADS//2 + 1
     return nn.Sequential(
-        nn.Linear(LATENT_SIZE, LATENT_SIZE),
+        nn.Linear((ATTENTION_HEADS + 1) * LATENT_SIZE, l*LATENT_SIZE),
         # nn.LayerNorm(l*LATENT_SIZE),
-        activation(LATENT_SIZE),
-        nn.Linear(LATENT_SIZE, LATENT_SIZE),
+        activation(l*LATENT_SIZE),
+        nn.Linear(l*LATENT_SIZE, LATENT_SIZE),
         # nn.LayerNorm(LATENT_SIZE),
         activation(LATENT_SIZE),
         nn.Linear(LATENT_SIZE, LATENT_SIZE),
@@ -202,7 +197,7 @@ class DynamicsNetwork(nn.Module):
             nn.Linear(L3_SIZE, LATENT_SIZE),
         )
         self.distance_transform = nn.Parameter(
-            (torch.rand((ATTENTION_HEADS, LATENT_SIZE, EMBEDDING_SIZE*2), device="cuda") * 2.0 - 1.0) * 0.2)
+            torch.rand((ATTENTION_HEADS, LATENT_SIZE, EMBEDDING_SIZE*2), device="cuda") * 2.0 - 1.0)
         self.transform = nn.Parameter(
             torch.rand((ATTENTION_HEADS, LATENT_SIZE, LATENT_SIZE), device="cuda") * 2.0 - 1.0)
         self.query_transform = nn.ParameterList([nn.Sequential(
@@ -233,7 +228,6 @@ class DynamicsNetwork(nn.Module):
             torch.randn((EMBEDDING_SIZE-1) // d // 2, device="cuda") * 10,
             requires_grad=False
         )
-        # self.norms = nn.ParameterList([nn.LayerNorm(LATENT_SIZE) for _ in range(ATTENTION_HEADS)])
         self.delta_net = delta_network(1, self.in_dims, c, d, activation)
 
     def forward(self, means, full_covariances, u, boundaries,
@@ -259,20 +253,17 @@ class DynamicsNetwork(nn.Module):
     def _compute_deltas(self, sampler, t_params, features, delta_net, size):
         b, n, l = features.shape
 
-        # self.local_global_features = torch.cat((t_params, features), dim=-1)
         self.local_global_features = features
-        # sampler.preprocess_aggregate()
+        sampler.preprocess_aggregate()
 
-        # for i in range(ATTENTION_HEADS):
-        #     queries = self.query_transform[i](features).reshape(b, n, -1) # 1, n, L1_SIZE
-        #     keys = self.key_transform[i](features).reshape(b, n, -1) # 1, n, L1_SIZE
-        #     neighbor_features = sampler.aggregate_neighbors(
-        #         features.squeeze(0), self.transform[i], queries.squeeze(0),
-        #         keys.squeeze(0), self.frequencies, self.distance_transform[i])
-        #     # neighbor_features = self.norms[i](neighbor_features)
-        #     # print(sampler.indices, sampler.ranges)
-        #     self.local_global_features = torch.cat(
-        #         (self.local_global_features, neighbor_features.unsqueeze(0)), dim=-1)
+        for i in range(ATTENTION_HEADS):
+            queries = self.query_transform[i](features).reshape(b, n, -1) # 1, n, L1_SIZE
+            keys = self.key_transform[i](features).reshape(b, n, -1) # 1, n, L1_SIZE
+            neighbor_features = sampler.aggregate_neighbors(
+                features.squeeze(0), self.transform[i], queries.squeeze(0),
+                keys.squeeze(0), self.frequencies, self.distance_transform[i])
+            self.local_global_features = torch.cat(
+                (self.local_global_features, neighbor_features.unsqueeze(0)), dim=-1)
 
         deltas = delta_net(self.local_global_features)
         dmeans = deltas[...,:self.d*size].squeeze(0)
@@ -319,7 +310,7 @@ class Model(nn.Module):
         self.scale = scale
 
         if problem == Problem.TEST:
-            self.pde_weight = 2.0
+            self.pde_weight = 10.0
             self.bc_weight = 2.0
             self.conservation_weight = 0.5
             self.initial_weight = 1.0
@@ -349,15 +340,12 @@ class Model(nn.Module):
         gx, gy = torch.meshgrid((tx,ty), indexing="ij")
         self.initial_means = torch.stack((gx,gy), dim=-1)# * 0
         self.initial_means = self.initial_means.reshape(-1, d)
-        # self.initial_means += torch.randn_like(self.initial_means) * 0.1
 
         scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
         self.initial_scaling = torch.exp(scaling) * scale
-        # self.initial_scaling *= (1.0 + torch.randn_like(self.initial_scaling) * 0.4)
 
         self.transform_size = d * (d - 1) // 2
         self.initial_transforms = torch.zeros((nx*ny,self.transform_size), device="cuda")
-        # self.initial_transforms += (torch.randn_like(self.initial_transforms)*0.2).clamp(-0.5, 0.5)
 
         if problem == Problem.BURGERS or problem == Problem.DIFFUSION:
             self.channels = 1
@@ -436,7 +424,6 @@ class Model(nn.Module):
 
         def activation(in_dim):
             return nn.Tanh()
-            # return RBFAct(in_dim)
 
         if problem == Problem.NAVIER_STOKES:
             pde_size = 1
@@ -451,14 +438,18 @@ class Model(nn.Module):
 
     def randomize(self, n):
         if self.problem == Problem.TEST:
-            mask = self.boundary_mask.squeeze(-1)
-            if np.random.rand() > 0.75:
-                self.means[mask,1] = (0.9 + torch.rand(1, device="cuda") * 0.1) \
-                                   * ((torch.rand(1, device="cuda") > 0.5) * 2.0 - 1.0)
-            else:
-                self.means[mask,1] = (torch.rand(1, device="cuda") * 2.0 - 1.0) * 0.9
+            n = self.initial_means.shape[0]
 
-            self.u[mask] = torch.rand(1, device="cuda") * 2.0 - 1.0
+            if np.random.rand() > 0.75:
+                self.initial_means[:,1] = (0.9 + torch.rand(1, device="cuda").repeat(n) * 0.1) \
+                                   * ((torch.rand(1, device="cuda").repeat(n) > 0.5) * 2.0 - 1.0)
+            else:
+                self.initial_means[:,1] = (torch.rand(1, device="cuda").repeat(n) * 2.0 - 1.0) * 0.9
+
+            self.initial_u[:,0] = torch.rand(1, device="cuda").repeat(n) * 2.0 - 1.0
+
+            self.set_initial_params(
+                self.initial_means, self.initial_u, self.initial_scaling, self.initial_transforms)
         else:
             tx = torch.linspace(-1, 1, n).cuda() * self.scale
             ty = torch.linspace(-1, 1, n).cuda() * self.scale
@@ -509,8 +500,6 @@ class Model(nn.Module):
                 gaussians.build_full_covariances(self.scaling, self.transforms)
             self.covariances, self.conics = \
                 gaussians.flatten_covariances(self.full_covariances, self.full_conics)
-
-            # self.split(torch.logical_and(torch.rand(mask.shape, device="cuda") > 0.5, mask))
 
     def set_initial_params(self, means, u, scaling, transforms, train_initial=False):
         self.true_initial_u = u.clone()
@@ -598,15 +587,11 @@ class Model(nn.Module):
             eigvals, max_idx = torch.max(eigvals.real.abs(), dim=-1, keepdim=True)
             eigvecs = eigvals.unsqueeze(-1) * torch.gather(
                 eigvecs.real.transpose(-1, -2), 1, max_idx.unsqueeze(-1).expand(n, 1, self.d))
-            # displacements = torch.cat((torch.zeros_like(eigvecs), eigvecs), dim=1)
             displacements = torch.cat((-eigvecs, eigvecs), dim=1)
-            # displacements = torch.stack(
-            #    (-eigvecs[:,0], eigvecs[:,0], -eigvecs[:,1], eigvecs[:,1]), dim=1)
 
         split_means = (self.means[indices].reshape(n, 1, self.d) + displacements).reshape(-1, self.d)
         split_scaling = self.scaling[indices].repeat_interleave(self.split_size, 0)
         split_transforms = self.transforms[indices].repeat_interleave(self.split_size, 0)
-        # split_u = torch.cat((self.u[indices].unsqueeze(1), torch.zeros_like(self.u[indices]).unsqueeze(1)), dim=1).reshape(-1, self.channels)
         split_u = self.u[indices].repeat_interleave(self.split_size, 0) / 2.0
 
         n = split_means.shape[0]
@@ -651,7 +636,7 @@ class Model(nn.Module):
             #      - (u.reshape(-1, 1, 2) * ux).sum(-1)
 
         elif self.problem == Problem.TEST:  
-            return 0
+            return torch.zeros_like(u)
 
         else:
             raise ValueError("Unexpected PDE problem:", self.problem)
@@ -707,32 +692,26 @@ class Model(nn.Module):
             oob = self.means < -1.0
             self.means[oob] += 2.0
 
-        # mask = self.boundary_mask.squeeze(-1)
-        # print(self.means[mask])
-        # print(self.u[mask])
-        # print(self.u[mask][self.means[mask,1] > 1.0] + 1.0)
-        # print(torch.mean((self.u[mask][self.means[mask,1] > 1.0] + 1.0) ** 2))
-
         self.full_covariances, self.full_conics = \
             gaussians.build_full_covariances(self.scaling, self.transforms)
         self.covariances, self.conics = \
             gaussians.flatten_covariances(self.full_covariances, self.full_conics)
 
-        # keep_indices = torch.logical_or(
-        #     torch.norm(torch.abs(self.u), dim=-1) > 0.01, ~self.boundary_mask.squeeze(-1))
-        # self.u = self.u[keep_indices]
-        # self.means = self.means[keep_indices]
-        # self.scaling = self.scaling[keep_indices]
-        # self.transforms = self.transforms[keep_indices]
-        # self.covariances = self.covariances[keep_indices]
-        # self.conics = self.conics[keep_indices]
-        # self.full_covariances = self.full_covariances[keep_indices]
-        # self.full_conics = self.full_conics[keep_indices]
-        # self.boundary_mask = self.boundary_mask[keep_indices]
-        # self.boundaries = self.boundaries[keep_indices]
-
         if not split:
             return
+
+        keep_indices = torch.logical_or(
+            torch.norm(torch.abs(self.u), dim=-1) > 0.01, ~self.boundary_mask.squeeze(-1))
+        self.u = self.u[keep_indices]
+        self.means = self.means[keep_indices]
+        self.scaling = self.scaling[keep_indices]
+        self.transforms = self.transforms[keep_indices]
+        self.covariances = self.covariances[keep_indices]
+        self.conics = self.conics[keep_indices]
+        self.full_covariances = self.full_covariances[keep_indices]
+        self.full_conics = self.full_conics[keep_indices]
+        self.boundary_mask = self.boundary_mask[keep_indices]
+        self.boundaries = self.boundaries[keep_indices]
 
         with torch.no_grad():
             n = self.means.shape[0]
@@ -775,11 +754,6 @@ class Model(nn.Module):
             indices = ((metric > quantile).any(-1, keepdim=True) * self.boundary_mask).squeeze(-1)
             print(indices.sum().item())
 
-        # import matplotlib.pyplot as plt
-        # gaussians.plot_gaussians(self.means[indices], self.covariances[indices],
-        #                          self.u[indices], self.scale * 1.25)
-        # plt.show()
-
         # self.means = self.prev_means
         # self.u = self.prev_u
         # self.scaling = self.prev_scaling
@@ -788,11 +762,6 @@ class Model(nn.Module):
         # self.conics = self.prev_conics
 
         self.split(indices)
-        # self.forward(t, dt, False)
-
-        # import matplotlib.pyplot as plt
-        # gaussians.plot_gaussians(self.means, self.covariances, self.u, self.scale * 1.25)
-        # plt.show()
 
     def sample(self, samples, bc_samples):
         mask = self.boundary_mask.squeeze(-1)
@@ -876,12 +845,6 @@ class Model(nn.Module):
             pde_loss += torch.mean((ut[...,1] - rhs[...,1]) ** 2)
 
         elif self.problem == Problem.NAVIER_STOKES:
-            # self.sampler.preprocess(
-            #    self.prev_means, self.translation, self.prev_covariances, self.prev_conics, samples)
-            # translation_sample = self.sampler.sample_gaussians() # n, c
-
-            # pde_loss += torch.mean((translation_sample - self.u_samples[-2][...,:2]) ** 2)
-            
             pde_loss += torch.mean((ux[:,0,0] + ux[:,1,1]) ** 2)
             pde_loss += torch.mean((wt - rhs) ** 2)
 
@@ -889,11 +852,11 @@ class Model(nn.Module):
             pde_loss += torch.mean((self.dmeans[mask,1] - self.u[mask,0] / 5.0) ** 2)
 
         if self.problem == Problem.TEST:
-            negative = self.means[mask,1] < -1.0
+            negative = self.means[mask,1] < -0.8
             if torch.any(negative):
                 bc_loss += torch.mean((self.u[mask][negative] - 1.0) ** 2)
 
-            positive = self.means[mask,1] > 1.0
+            positive = self.means[mask,1] > 0.8
             if torch.any(positive):
                 bc_loss += torch.mean((self.u[mask][positive] + 1.0) ** 2)
 
@@ -902,14 +865,15 @@ class Model(nn.Module):
 
         if self.problem == Problem.TEST:
             conservation_loss += self.dmean_weight * torch.mean(self.dmeans[mask,0] ** 2)
-            conservation_loss += 10.0 * self.dmean_weight * torch.mean(
+            conservation_loss += self.dmean_weight * torch.mean(
                 (self.dmeans[mask] - self.dmeans[mask].mean(0).reshape(1, -1)) ** 2)
-            in_range = self.means[mask,1].abs() < 0.9
+            conservation_loss += self.dmean_weight * torch.mean(
+                (self.means[mask,1] - self.means[mask,1].mean()) ** 2)
+            in_range = self.means[mask,1].abs() < 0.8
             if torch.any(in_range):
+                conservation_loss += \
+                    self.du_weight * torch.mean((self.u[mask,0][in_range].abs() - 1.0) ** 2)
                 conservation_loss += self.du_weight * torch.mean(self.du[mask][in_range] ** 2)
-            # if torch.any(~in_range):
-            #     conservation_loss += self.dmean_weight * torch.mean(
-            #         (self.dmeans[mask,1][~in_range] - self.means[mask,1][~in_range].sign()) ** 2)
         else:
             conservation_loss += self.dmean_weight * torch.mean(self.dmeans[mask] ** 2)
             conservation_loss += self.du_weight * torch.mean(self.du[mask] ** 2)

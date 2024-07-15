@@ -23,7 +23,6 @@ transform = torch.zeros((nx*ny, d * (d - 1) // 2), device="cuda")
 # for i in range(ny):
 #     for j in range(nx):
 #         transform[j,i,0] = 0.5 + i * j * 0.01
-opacities = torch.ones((nx*ny), device="cuda") * 0.5
 conics = torch.inverse(torch.diag(torch.ones(d, device="cuda")) * 0.1)
 
 sample_mean = torch.tensor([0.1, 0.4], device="cuda").reshape(1, d, 1)
@@ -34,11 +33,11 @@ values = torch.exp(powers).squeeze(-1)
 scaling = torch.exp(scaling)
 transform = torch.tanh(transform)
 
-covariances = gaussians.build_covariances(scaling, transform)
-conics = torch.inverse(covariances)
+full_covariances, full_conics = gaussians.build_full_covariances(scaling, transform)
+covariances, conics = gaussians.flatten_covariances(full_covariances, full_conics)
 
-gaussians.plot_gaussians(means, covariances, opacities, values)
-plt.savefig("gaussian_plot.png")
+gaussians.plot_gaussians(means, covariances, values)
+plt.show()
 
 res = 256
 tx = torch.linspace(-1, 1, res).cuda()
@@ -47,14 +46,14 @@ gx, gy = torch.meshgrid((tx, ty), indexing="xy")
 samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
 
 start = time.time()
-result_py = gaussians.sample_gaussians(means, conics, opacities, values, samples)
+result_py = gaussians.sample_gaussians(means, full_conics, values, samples)
 img_py = result_py.reshape(res, res).detach().cpu().numpy()
 print("Original:", time.time() - start)
 
 sampler = GaussianSampler(True)
 
 start = time.time()
-sampler.preprocess(means, values, covariances, conics, opacities, samples)
+sampler.preprocess(means, values, covariances, conics, samples)
 result_cuda = sampler.sample_gaussians()
 img_cuda = result_cuda.reshape(res, res).detach().cpu().numpy()
 print("CUDA:", time.time() - start)
@@ -74,4 +73,4 @@ im = ax[2].imshow(img_py - img_cuda)
 ax[2].axis("off")
 plt.colorbar(im)
 plt.tight_layout()
-plt.savefig("sample_comparison.png")
+plt.show()

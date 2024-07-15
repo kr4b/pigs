@@ -6,6 +6,8 @@ from torch import nn
 
 import gaussians
 
+from diff_gaussian_sampling import GaussianSampler
+
 res = 64
 nx = ny = 10
 d = 2
@@ -19,21 +21,25 @@ scaling = torch.ones((nx*ny,d), device="cuda") * -4.0
 scaling = torch.exp(scaling)
 transform = torch.zeros((nx*ny,d * (d - 1) // 2), device="cuda")
 transform = torch.tanh(transform)
-opacities = torch.ones((nx*ny), device="cuda") * 0.25
 
-covariances = gaussians.build_covariances(scaling, transform)
-conics = torch.inverse(covariances)
+covariances, conics = gaussians.build_covariances(scaling, transform)
 
 values = torch.ones((nx*ny,1), device="cuda") * 0.5
 
-gaussians.plot_gaussians(means, covariances, opacities, values)
-plt.savefig("density_gaussians.png")
+gaussians.plot_gaussians(means, covariances, values)
+plt.show()
 
-img1 = gaussians.sample_gaussians_img(
-    means, conics, opacities, values, res, res, 1.0).detach().cpu().numpy()
+tx = torch.linspace(-1, 1, res).cuda()
+ty = torch.linspace(-1, 1, res).cuda()
+gx, gy = torch.meshgrid((tx, ty), indexing="xy")
+samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
+
+sampler = GaussianSampler(True)
+sampler.preprocess(means, values, covariances, conics, samples)
+img1 = sampler.sample_gaussians().reshape(res, res).detach().cpu().numpy()
 
 plt.figure()
 plt.imshow(img1)
 plt.axis("off")
 plt.colorbar()
-plt.savefig("density.png")
+plt.show()

@@ -15,20 +15,20 @@ from model_pn import *
 
 from diff_gaussian_sampling import GaussianSampler
 
-train_timesteps = 10
+train_timesteps = 30
 cutoff_timesteps = 1
-test_timesteps = 10
+test_timesteps = 50
 
-scale = 2.5
+scale = 1.0
 
-nx = ny = 30
+nx = ny = 20
 d = 2
 
 torch.manual_seed(1)
 np.random.seed(1)
 
 model = Model(
-    Problem.BURGERS, 
+    Problem.TEST, 
     IntegrationRule.TRAPEZOID,
     nx, ny, d, scale
 )
@@ -48,62 +48,6 @@ if model.problem == Problem.NAVIER_STOKES:
 
     model.set_initial_params(means, values, scaling, transforms)
 
-    # for i in range(50):
-    #     means = gaussian_parameters[i]["means"].data
-    #     values = gaussian_parameters[i]["values"].data
-    #     scaling = gaussian_parameters[i]["scaling"].data
-    #     transforms = gaussian_parameters[i]["transforms"].data
-
-    #     model.set_initial_params(means, values, scaling, transforms)
-    #     model.plot_gaussians()
-    #     plt.savefig("../training_data/V1e-3/gaussians_{}.png".format(i))
-
-    #     res = 128
-    #     tx = torch.linspace(-1, 1, res).cuda() * scale
-    #     ty = torch.linspace(-1, 1, res).cuda() * scale
-    #     gx, gy = torch.meshgrid((tx, ty), indexing="xy")
-    #     samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
-    #     model.sampler.preprocess(model.means, model.u, model.covariances, model.conics, samples)
-
-    #     img = model.sampler.sample_gaussians().reshape(res*res,2).detach().cpu().numpy()
-    #     plt.figure()
-    #     plt.imshow(img[:,0].reshape(res, res), cmap="plasma")
-    #     plt.savefig("../training_data/V1e-3/frame_{}.png".format(i))
-
-    # exit()
-
-    # res = 128
-    # tx = torch.linspace(-1, 1, res).cuda() * scale
-    # ty = torch.linspace(-1, 1, res).cuda() * scale
-    # gx, gy = torch.meshgrid((tx, ty), indexing="xy")
-    # samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
-    # model.sampler.preprocess(model.means, model.u, model.covariances, model.conics, samples)
-
-    # ux = model.sampler.sample_gaussians_derivative().reshape(res*res, d, 2)
-    # img1 = ux[:,0,1] - ux[:,1,0]
-
-    # desired = f[1,:,:,0]
-
-    # res = 64
-    # coords = ((samples + 1.0) / 2.0 * res).to(torch.long).clamp(0, res-1)
-    # coords = coords[:,1] * res + coords[:,0]
-    # img2 = torch.take(desired, coords).squeeze()
-
-    # res = 128
-    # fig = plt.figure()
-    # ax = fig.subplots(1, 2)
-    # im = ax[0].imshow(img1.reshape(res, res).detach().cpu().numpy())
-    # plt.colorbar(im)
-    # im = ax[1].imshow(img2.reshape(res, res).detach().cpu().numpy())
-    # plt.colorbar(im)
-    # plt.show()
-    # plt.close(fig)
-
-    # exit()
-
-# for name, p in model.named_parameters():
-#     print(name, p.numel())
-
 print(sum(p.numel() for p in model.parameters()))
 
 training_loss = []
@@ -112,7 +56,7 @@ mean_loss = []
 log_step = 100
 n_samples = 1024
 
-optim = torch.optim.Adam(model.parameters())#, lr=1e-2)
+optim = torch.optim.Adam(model.parameters())
 # scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.995)
 
 dt = 1.0
@@ -123,78 +67,18 @@ if len(sys.argv) > 1:
     state = torch.load(sys.argv[1])
 
     training_loss = state["training_loss"]
-    # fig = plt.figure()
-    # plt.plot(np.linspace(0, len(training_loss)*log_step, len(training_loss)), training_loss)
-    # plt.yscale("log")
-    # plt.show()
-    # plt.close(fig)
-    # exit()
-
-    # prev_initial_u = model.initial_u.clone()
-    # prev_initial_means = model.initial_means.clone()
-    # prev_initial_scaling = model.initial_scaling.clone()
-    # prev_initial_transforms = model.initial_transforms.clone()
     model.load_state_dict(state["model"])
-    # model.initial_u = nn.Parameter(prev_initial_u)
-    # model.initial_means = nn.Parameter(prev_initial_means)
-    # model.initial_scaling = nn.Parameter(prev_initial_scaling)
-    # model.initial_transforms = nn.Parameter(prev_initial_transforms)
-    # model.set_initial_params(
-    #     model.initial_means.detach().data, model.initial_u.detach().data, model.initial_scaling.detach().data, model.initial_transforms.detach().data)
     optim.load_state_dict(state["optimizer"])
     start = state["epoch"]
     training_loss = state["training_loss"]
 
-gaussian_parameters = torch.load("initialization/init_gaussian2.pt")
-means = gaussian_parameters["means"] * scale
-values = gaussian_parameters["values"]
-scaling = gaussian_parameters["scaling"] * scale * scale
-transforms = gaussian_parameters["transforms"]
-
-model.set_initial_params(means, values, scaling, transforms)
-
-# model.reset(False)
-# model.randomize(nx)
+# gaussian_parameters = torch.load("initialization/double_gaussian2.pt")
+# means = gaussian_parameters["means"] * scale
+# values = gaussian_parameters["values"]
+# scaling = gaussian_parameters["scaling"] * scale * scale
+# transforms = gaussian_parameters["transforms"]
 # 
-# fig = model.plot_gaussians()
-# # plt.savefig("../../notes/training-figures/init_uniform_gaussians.pdf")
-# plt.show()
-# plt.close(fig)
-# 
-# res = 128
-# img = model.generate_images(res)
-# 
-# if model.problem == Problem.WAVE:
-#     for i in range(2):
-#         plt.figure()
-#         plt.imshow(img[i])
-#         plt.colorbar()
-#         plt.show()
-# else:
-#     plt.figure()
-#     plt.imshow(img[0])
-#     plt.colorbar()
-#     plt.show()
-#     # plt.axis("off")
-#     # plt.savefig("../../notes/training-figures/init_uniform.png", bbox_inches="tight")
-# 
-# exit()
-
-# tx = torch.linspace(-1, 1, res).cuda() * scale
-# ty = torch.flip(torch.linspace(-1, 1, res).cuda().unsqueeze(-1), (0,1)).squeeze() * scale
-# gx, gy = torch.meshgrid((tx, ty), indexing="xy")
-# samples = torch.stack((gx, gy), dim=-1).reshape(res * res, d)
-# 
-# ones = torch.ones((model.means[model.boundary_mask.squeeze()].shape[0], 1), device="cuda")
-# model.sampler.preprocess(model.means[model.boundary_mask.squeeze()], ones, model.covariances[model.boundary_mask.squeeze()], model.conics[model.boundary_mask.squeeze()], samples)
-# density = model.sampler.sample_gaussians().reshape(res, res, 1).detach().cpu().numpy()
-# 
-# plt.figure()
-# plt.imshow(density)
-# plt.colorbar()
-# plt.show()
-# 
-# exit()
+# model.set_initial_params(means, values, scaling, transforms)
 
 if len(sys.argv) <= 1 or "--resume" in sys.argv:
     os.makedirs("checkpoints", exist_ok=True)
@@ -207,11 +91,11 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
     N = 5000
     log_step = 10
     save_step = 100
-    bootstrap_rate = 100
+    bootstrap_rate = 50
     split_epoch = 10000
     epsilon = 1
 
-    current_timesteps = 1
+    current_timesteps = 20
     epoch = start
 
     for epoch in range(start, N):
@@ -265,27 +149,8 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
             model.set_initial_params(means, values, scaling, transforms)
 
             total_recon_loss = 0
-        # elif model.problem != Problem.TEST:
         else:
             model.randomize(np.random.randint(15, 40))
-            model.reset(False) # epoch <= split_epoch)
-
-            if np.random.rand() > 0.5:
-                gaussian_parameters = torch.load("initialization/double_gaussian2.pt")
-                means = gaussian_parameters["means"].data * scale
-                values = gaussian_parameters["values"].data
-                scaling = gaussian_parameters["scaling"].data * scale * scale
-                transforms = gaussian_parameters["transforms"].data
-
-                model.set_initial_params(means, values, scaling, transforms)
-            else:
-                gaussian_parameters = torch.load("initialization/init_gaussian2.pt")
-                means = gaussian_parameters["means"].data * scale
-                values = gaussian_parameters["values"].data
-                scaling = gaussian_parameters["scaling"].data * scale * scale
-                transforms = gaussian_parameters["transforms"].data
-
-                model.set_initial_params(means, values, scaling, transforms)
 
         model.sample(samples, bc_samples)
 
@@ -332,9 +197,6 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
             total_initial_loss += initial_loss.item()
             total_magnitude_loss += magnitude_loss.item()
 
-            # if epoch < 20:
-            #     current_loss = conservation_loss
-            # else:
             current_loss = pde_loss + bc_loss + conservation_loss + initial_loss
 
             if model.problem == Problem.NAVIER_STOKES:
@@ -416,7 +278,7 @@ if len(sys.argv) <= 1 or "--resume" in sys.argv:
 
 torch.manual_seed(0)
 
-# model.reset(False)
+model.reset(False)
 
 imgs = []
 vmin = np.inf
@@ -424,7 +286,7 @@ vmax = -np.inf
 
 total_loss = 0.0
 
-gt = np.load("burgers_simple_gt.npy")
+gt = np.load("burgers_double_gt.npy")
 
 total_time = 0
 evo_time = 0
@@ -448,69 +310,70 @@ with torch.no_grad():
         fig = model.plot_gaussians()
         # plt.axis("off")
         # plt.savefig("../../notes/results/burgers/simple/gaussians{}.png".format(i), bbox_inches="tight")
+        plt.savefig("results_model_pn/gaussians{}.png".format(i), bbox_inches="tight")
         plt.close(fig)
 
         mask = model.boundary_mask.squeeze()
         model.sampler.preprocess(
             model.means[mask], model.u[mask], model.covariances[mask], model.conics[mask], samples)
 
-        nt = 10
-        time_samples = (np.arange(1, nt+1) / nt).reshape(1, 1, -1).repeat(res*res, axis=0)
+        # nt = 10
+        # time_samples = (np.arange(1, nt+1) / nt).reshape(1, 1, -1).repeat(res*res, axis=0)
 
-        start = time.time()
+        # start = time.time()
         u = model.sampler.sample_gaussians().reshape(res*res, -1, 1).detach().cpu().numpy()
-        if i == test_timesteps - 1:
-            evo_time += time.time() - start
-        total_time += time.time() - start
+        # if i == test_timesteps - 1:
+        #     evo_time += time.time() - start
+        # total_time += time.time() - start
 
-        ux = \
-           model.sampler.sample_gaussians_derivative().reshape(res*res, d, -1).detach().cpu().numpy()
-        uxx = \
-           model.sampler.sample_gaussians_laplacian().reshape(res*res,-1,1).detach().cpu().numpy()
-        if model.problem == Problem.NAVIER_STOKES:
-            uxxx = model.sampler.sample_gaussians_third_derivative() \
-                        .reshape(res*res, -1, 1).detach().cpu().numpy()
-        sample_u = time_samples * u.reshape(res*res, -1, 1) \
-                 - (1.0 - time_samples) * prev_u.reshape(res*res, -1, 1)
-        sample_ux = time_samples * ux.reshape(res*res, -1, 1) \
-                  - (1.0 - time_samples) * prev_ux.reshape(res*res, -1, 1)
-        sample_uxx = time_samples * uxx.reshape(res*res, -1, 1) \
-                   - (1.0 - time_samples) * prev_uxx.reshape(res*res, -1, 1)
-        if model.problem == Problem.NAVIER_STOKES:
-            sample_uxxx = time_samples * uxxx.reshape(res*res, -1, 1) \
-                        - (1.0 - time_samples) * prev_uxxx.reshape(res*res, -1, 1)
+        # ux = \
+        #    model.sampler.sample_gaussians_derivative().reshape(res*res, d, -1).detach().cpu().numpy()
+        # uxx = \
+        #    model.sampler.sample_gaussians_laplacian().reshape(res*res,-1,1).detach().cpu().numpy()
+        # if model.problem == Problem.NAVIER_STOKES:
+        #     uxxx = model.sampler.sample_gaussians_third_derivative() \
+        #                 .reshape(res*res, -1, 1).detach().cpu().numpy()
+        # sample_u = time_samples * u.reshape(res*res, -1, 1) \
+        #          - (1.0 - time_samples) * prev_u.reshape(res*res, -1, 1)
+        # sample_ux = time_samples * ux.reshape(res*res, -1, 1) \
+        #           - (1.0 - time_samples) * prev_ux.reshape(res*res, -1, 1)
+        # sample_uxx = time_samples * uxx.reshape(res*res, -1, 1) \
+        #            - (1.0 - time_samples) * prev_uxx.reshape(res*res, -1, 1)
+        # if model.problem == Problem.NAVIER_STOKES:
+        #     sample_uxxx = time_samples * uxxx.reshape(res*res, -1, 1) \
+        #                 - (1.0 - time_samples) * prev_uxxx.reshape(res*res, -1, 1)
 
-        sample_ux = sample_ux.reshape(res*res, d, model.channels, -1)
-        sample_uxx = sample_uxx.reshape(res*res, d, d, model.channels, -1)
-        if model.problem == Problem.NAVIER_STOKES:
-            sample_uxxx = sample_uxxx.reshape(res*res, d, d, d, model.channels, -1)
-            w = ux[:,0,1] - ux[:,1,0]
-            wx = sample_uxx[:,:,0,1] - sample_uxx[:,:,1,0]
-            wxx = sample_uxxx[:,:,:,0,1] -  sample_uxxx[:,:,:,1,0]
+        # sample_ux = sample_ux.reshape(res*res, d, model.channels, -1)
+        # sample_uxx = sample_uxx.reshape(res*res, d, d, model.channels, -1)
+        # if model.problem == Problem.NAVIER_STOKES:
+        #     sample_uxxx = sample_uxxx.reshape(res*res, d, d, d, model.channels, -1)
+        #     w = ux[:,0,1] - ux[:,1,0]
+        #     wx = sample_uxx[:,:,0,1] - sample_uxx[:,:,1,0]
+        #     wxx = sample_uxxx[:,:,:,0,1] -  sample_uxxx[:,:,:,1,0]
 
-        if model.problem == Problem.NAVIER_STOKES:
-            loss = np.zeros((res*res))
-            sample_pde = np.zeros((res*res))
-        else:
-            loss = np.zeros((res*res, model.channels))
-            sample_pde = np.zeros((res*res, model.channels))
+        # if model.problem == Problem.NAVIER_STOKES:
+        #     loss = np.zeros((res*res))
+        #     sample_pde = np.zeros((res*res))
+        # else:
+        #     loss = np.zeros((res*res, model.channels))
+        #     sample_pde = np.zeros((res*res, model.channels))
 
-        for j in range(nt):
-            if model.problem == Problem.NAVIER_STOKES:
-                rhs = model.pde_rhs(
-                    samples,sample_u[...,j],sample_ux[...,j],sample_uxx[...,j],wx[...,j],wxx[...,j])
-                loss += (w - prev_w) - dt * rhs
-            else:
-                rhs = model.pde_rhs(samples, sample_u[...,j], sample_ux[...,j], sample_uxx[...,j])
-                loss += (u - prev_u).squeeze(-1) - dt * rhs
+        # for j in range(nt):
+        #     if model.problem == Problem.NAVIER_STOKES:
+        #         rhs = model.pde_rhs(
+        #             samples,sample_u[...,j],sample_ux[...,j],sample_uxx[...,j],wx[...,j],wxx[...,j])
+        #         loss += (w - prev_w) - dt * rhs
+        #     else:
+        #         rhs = model.pde_rhs(samples, sample_u[...,j], sample_ux[...,j], sample_uxx[...,j])
+        #         loss += (u - prev_u).squeeze(-1) - dt * rhs
 
-            sample_pde += rhs
+        #     sample_pde += rhs
 
-        sample_pde = dt * sample_pde.reshape(res, res, -1) / nt
-        loss = loss.reshape(res, res, -1) / nt
-        if i > 0:
-            total_loss += (loss ** 2).sum().item()
-            print((loss ** 2).sum().item())
+        # sample_pde = dt * sample_pde.reshape(res, res, -1) / nt
+        # loss = loss.reshape(res, res, -1) / nt
+        # if i > 0:
+        #     total_loss += (loss ** 2).sum().item()
+        #     print((loss ** 2).sum().item())
 
         # laplacian = uxx[...,0,0].reshape(res, res, 1) + uxx[...,-1,0].reshape(res, res, 1)
         # ut = u.reshape(res, res, 1) - prev_u.reshape(res, res, 1)
@@ -520,16 +383,22 @@ with torch.no_grad():
         else:
             imgs.append(u.reshape(res, res, -1))
 
-        if i > 0:
-            desired = torch.tensor(gt[i], device="cuda")
+        # desired = torch.tensor(gt[i], device="cuda")
 
-            im_res = 500
-            coords = ((samples / scale + 1.0) / 2.0 * im_res).to(torch.long).clamp(0, im_res-1)
-            coords = coords[:,1] * im_res + coords[:,0]
+        # im_res = 500
+        # coords = ((samples / scale + 1.0) / 2.0 * im_res).to(torch.long).clamp(0, im_res-1)
+        # coords = coords[:,1] * im_res + coords[:,0]
 
-            desired = torch.take(desired.T, coords).reshape(res, res)
-            norm = torch.norm(torch.tensor(imgs[-1], device="cuda").squeeze() - desired) / torch.norm(desired)
-            total_norm += norm.item()
+        # desired = torch.take(desired.T, coords).reshape(res, res)
+
+        # fig = plt.figure()
+        # ax = fig.subplots(1, 2)
+        # ax[0].imshow(desired.detach().cpu().numpy())
+        # ax[1].imshow(imgs[-1])
+        # plt.show()
+
+        # norm = torch.norm(torch.tensor(imgs[-1], device="cuda").squeeze() - desired) / torch.norm(desired)
+        # total_norm += norm.item()
 
         # fig = plt.figure()
         # ax = fig.subplots(2, 2)
@@ -583,11 +452,11 @@ with torch.no_grad():
         # plt.savefig("results_model_pn/split{}.png".format(i))
 
         prev_u = u
-        prev_ux = ux
-        prev_uxx = uxx
-        if model.problem == Problem.NAVIER_STOKES:
-            prev_w = w
-            prev_uxxx = uxxx
+        # prev_ux = ux
+        # prev_uxx = uxx
+        # if model.problem == Problem.NAVIER_STOKES:
+        #     prev_w = w
+        #     prev_uxxx = uxxx
 
     for i in range(test_timesteps):
         fig = plt.figure()
@@ -604,9 +473,10 @@ with torch.no_grad():
             plt.colorbar()
             # plt.colorbar()
 
-        # plt.axis("off")
-        plt.savefig("../../notes/results/burgers/simple/frame{}.png".format(i), bbox_inches="tight")
-        # plt.close(fig)
+        plt.axis("off")
+        # plt.savefig("../../notes/results/burgers/simple/frame{}.png".format(i), bbox_inches="tight")
+        plt.savefig("results_model_pn/frame{}.png".format(i), bbox_inches="tight")
+        plt.close(fig)
 
 print("Time (full):", total_time)
 print("Time (evo):", evo_time)
