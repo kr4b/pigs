@@ -1,0 +1,3 @@
+[submodule "diff-gaussian-sampling"]
+	path = diff-gaussian-sampling
+	url = https://github.com/kr4b/diff-gaussian-sampling
